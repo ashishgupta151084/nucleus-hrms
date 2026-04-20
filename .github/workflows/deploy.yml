@@ -1,0 +1,34 @@
+name: Deploy Nucleus HRMS to Firebase
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build
+        run: npm run build
+      
+      - name: Deploy to Firebase
+        run: npm install -g firebase-tools && firebase deploy --token "${{ secrets.FIREBASE_TOKEN }}" --only hosting
+
+
+
+git add .
+git commit -m "Add deploy workflow"
+git push origin main
+X
+
