@@ -8,6 +8,24 @@ import {
   addNotification, updateNotification, onNotifications
 } from "./firebase";
 
+// ── OTP utility ──────────────────────────────────────
+const generateOTP=()=>Math.floor(100000+Math.random()*900000).toString();
+const otpStore={}; // in-memory OTP store {email: {otp, expires}}
+const sendOTP=async(email)=>{
+  const otp=generateOTP();
+  otpStore[email]={otp,expires:Date.now()+10*60*1000}; // 10 min expiry
+  await sendEmail(email,"Nucleus HRMS — Password Reset OTP",
+    `Your OTP for password reset is: ${otp}\n\nThis OTP is valid for 10 minutes.\n\nIf you did not request this, please ignore.`
+  );
+  return otp;
+};
+const verifyOTP=(email,otp)=>{
+  const stored=otpStore[email];
+  if(!stored)return false;
+  if(Date.now()>stored.expires)return false;
+  return stored.otp===otp;
+};
+
 // ── Email notification utility (EmailJS - free tier) ──────────────
 const sendEmail=async(to,subject,body)=>{
   try{
@@ -114,7 +132,7 @@ const ICAI_RULES={
   excessLeaveAction:"extend_articleship",
 };
 // Admin-only initial config — written to Firebase on first run
-const ADMIN_USER={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",teamId:null,officeIds:[],customShift:null,managedTeams:[],weeklyOff:"sun_sat"};
+const ADMIN_USER={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",teamId:null,officeIds:[],customShift:null,managedTeams:[],weeklyOff:"sun_sat",firstLogin:false};
 // Role hierarchy: admin > hr > hod > manager > staff
 const ROLES=["admin","hr","hod","manager","staff"];
 const ROLE_LABELS={admin:"Admin",hr:"HR Manager",hod:"HOD",manager:"Manager",staff:"Staff"};
@@ -335,7 +353,16 @@ export default function App() {
     }
   },[D.users]);
 
-  useEffect(()=>{if(cu)setSc(["admin","hr","hod","manager"].includes(cu.role)?cu.role==="admin"||cu.role==="hr"?"dash":"home":"home");else setSc("login");},[cu]);
+  useEffect(()=>{
+    if(cu){
+      // Check if first login
+      const freshUser=(D.users||[]).find(u=>u.id===cu.id);
+      if(freshUser?.firstLogin===true){setSc("firstlogin");return;}
+      setSc(["admin","hr","hod","manager"].includes(cu.role)?cu.role==="admin"||cu.role==="hr"?"dash":"home":"home");
+    } else {
+      setSc("login");
+    }
+  },[cu]);
 
   const login=(e,p)=>{
     const u=(D.users||[]).find(u=>u.email===e&&u.password===p);
@@ -357,13 +384,15 @@ export default function App() {
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-      {sc==="login"&&<Login login={login} name={D.companyName}/>}
+      {sc==="login"&&<Login login={login} name={D.companyName} D={D} P={P} ST={ST} logout={logout}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
       {sc==="lv"&&<Lv {...props}/>}
       {sc==="notif"&&<Notif {...props}/>}
       {sc==="reg"&&<Reg {...props}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
+      {sc==="changepwd"&&<ChangePwd {...props} logout={logout}/>}
+      {sc==="firstlogin"&&<FirstLogin {...props} logout={logout}/>}
       {sc==="teamdash"&&<Dash {...props}/>}
       {sc==="dash"&&<Dash {...props}/>}
       {toast&&<Msg t={toast}/>}
@@ -385,7 +414,16 @@ function Login({login,name}) {
           <FRow label="Email"><input style={I} type="email" value={e} onChange={x=>setE(x.target.value)} placeholder="you@nucleusadvisors.in"/></FRow>
           <FRow label="Password"><input style={I} type="password" value={p} onChange={x=>setP(x.target.value)} placeholder="••••••••" onKeyDown={x=>x.key==="Enter"&&login(e,p)}/></FRow>
           <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:"#000",fontWeight:800}}>Sign In →</button>
+          <div style={{textAlign:"center",marginTop:10}}>
+            <span onClick={()=>setShowForgot(true)} style={{fontSize:12,color:G.bl,cursor:"pointer",textDecoration:"underline"}}>Forgot Password?</span>
+          </div>
         </div>
+        {showForgot&&(
+          <div style={{...K,marginTop:12,padding:16}}>
+            <div style={{fontWeight:700,color:G.gold,marginBottom:8}}>📧 Reset via Email OTP</div>
+            <ChangePwd user={{email:e}} D={D} P={P} ST={ST} setSc={()=>setShowForgot(false)} logout={()=>setShowForgot(false)}/>
+          </div>
+        )}
         <div style={{textAlign:"center",marginTop:8}}>
           <div style={{fontSize:11,color:G.dim}}>Developed by <span style={{color:G.mut,fontWeight:700}}>Ashish Gupta</span></div>
           <div style={{fontSize:10,color:G.dim,marginTop:4}}>© {new Date().getFullYear()} Nucleus Advisors. All rights reserved.</div>
@@ -564,6 +602,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           ["Notifications"+(unread>0?` (${unread})`:""),"notif"],
           ...(user.role==="manager"||user.role==="hod"?[["My Team","teamdash"]]:[]),
           ...(rec&&rec.lateBy>0&&!rec.checkOut?[["Request Late Approval","lateapproval"]]:[]),
+          ["Change Password","changepwd"],
         ].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(s==="lateapproval"?G.am:G.card),border:`1px solid ${s==="lateapproval"?G.am:G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
@@ -754,6 +793,153 @@ function Notif({user,D,P,setSc}) {
 }
 
 
+
+function FirstLogin({user,D,P,ST,setSc,logout}) {
+  const [np,setNp]=useState("");
+  const [cp,setCp]=useState("");
+  const save=()=>{
+    if(!np||np.length<6)return ST("Password must be at least 6 characters","error");
+    if(np!==cp)return ST("Passwords do not match","error");
+    P({...D,users:D.users.map(u=>u.id===user.id?{...u,password:np,firstLogin:false}:u)});
+    const updated={...user,password:np,firstLogin:false};
+    ST("✅ Password set! Please login again.");
+    setTimeout(()=>logout(),1500);
+  };
+  return (
+    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{maxWidth:400,width:"100%"}}>
+        <div style={{...K,padding:24}}>
+          <div style={{textAlign:"center",marginBottom:20}}>
+            <div style={{fontSize:40,marginBottom:8}}>🔐</div>
+            <div style={{fontSize:18,fontWeight:800,color:G.gold}}>Set Your Password</div>
+            <div style={{fontSize:13,color:G.mut,marginTop:6}}>Welcome {user.name}! Please set a new password before continuing.</div>
+          </div>
+          <FRow label="New Password">
+            <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
+          </FRow>
+          <FRow label="Confirm Password">
+            <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter password" onKeyDown={e=>e.key==="Enter"&&save()}/>
+          </FRow>
+          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800,fontSize:15}}>Set Password & Continue →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChangePwd({user,D,P,ST,setSc,logout}) {
+  const [mode,setMode]=useState("menu"); // menu | current | otp
+  const [cur,setCur]=useState("");
+  const [np,setNp]=useState("");
+  const [cp,setCp]=useState("");
+  const [email,setEmail]=useState(user?.email||"");
+  const [otp,setOtp]=useState("");
+  const [otpSent,setOtpSent]=useState(false);
+  const [sending,setSending]=useState(false);
+
+  const changeWithCurrent=()=>{
+    const u=(D.users||[]).find(x=>x.id===user.id);
+    if(!u||cur!==u.password)return ST("Current password is incorrect","error");
+    if(!np||np.length<6)return ST("New password must be at least 6 characters","error");
+    if(np!==cp)return ST("Passwords do not match","error");
+    P({...D,users:D.users.map(x=>x.id===user.id?{...x,password:np}:x)});
+    ST("✅ Password changed successfully!");
+    setTimeout(()=>setSc(user.role==="admin"||user.role==="hr"?"dash":"home"),1500);
+  };
+
+  const sendOtp=async()=>{
+    const u=(D.users||[]).find(x=>x.email===email);
+    if(!u)return ST("Email not found","error");
+    setSending(true);
+    await sendOTP(email);
+    setOtpSent(true);setSending(false);
+    ST("✅ OTP sent to "+email);
+  };
+
+  const changeWithOtp=()=>{
+    if(!verifyOTP(email,otp))return ST("Invalid or expired OTP","error");
+    if(!np||np.length<6)return ST("New password must be at least 6 characters","error");
+    if(np!==cp)return ST("Passwords do not match","error");
+    const u=(D.users||[]).find(x=>x.email===email);
+    if(!u)return ST("User not found","error");
+    P({...D,users:D.users.map(x=>x.email===email?{...x,password:np}:x)});
+    ST("✅ Password reset successfully! Please login again.");
+    setTimeout(()=>logout(),1500);
+  };
+
+  const back=user?.role?()=>setSc(user.role==="admin"||user.role==="hr"?"dash":"home"):logout;
+
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
+        <button onClick={back} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>🔑 Password Settings</h2>
+      </div>
+
+      {mode==="menu"&&(
+        <>
+          <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`,marginBottom:12}}>
+            <div style={{color:G.gold,fontWeight:700}}>Choose an option</div>
+            <div style={{fontSize:12,color:G.dim,marginTop:4}}>You can change your password using your current password or via email OTP.</div>
+          </div>
+          <div style={{...K,cursor:"pointer"}} onClick={()=>setMode("current")}>
+            <div style={{fontWeight:700,fontSize:14}}>🔐 Change using current password</div>
+            <div style={{fontSize:12,color:G.dim,marginTop:4}}>You know your current password</div>
+          </div>
+          <div style={{...K,cursor:"pointer"}} onClick={()=>setMode("otp")}>
+            <div style={{fontWeight:700,fontSize:14}}>📧 Reset via Email OTP</div>
+            <div style={{fontSize:12,color:G.dim,marginTop:4}}>Forgot password or want to reset securely</div>
+          </div>
+        </>
+      )}
+
+      {mode==="current"&&(
+        <div style={K}>
+          <button onClick={()=>setMode("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button>
+          <FRow label="Current Password">
+            <input type="password" style={I} value={cur} onChange={e=>setCur(e.target.value)} placeholder="Enter current password"/>
+          </FRow>
+          <FRow label="New Password">
+            <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
+          </FRow>
+          <FRow label="Confirm New Password">
+            <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password" onKeyDown={e=>e.key==="Enter"&&changeWithCurrent()}/>
+          </FRow>
+          <button onClick={changeWithCurrent} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Change Password</button>
+        </div>
+      )}
+
+      {mode==="otp"&&(
+        <div style={K}>
+          <button onClick={()=>setMode("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button>
+          <FRow label="Your Email">
+            <input style={I} value={email} onChange={e=>setEmail(e.target.value)} placeholder="your@email.com"/>
+          </FRow>
+          {!otpSent?(
+            <button onClick={sendOtp} style={{...B(G.bl),width:"100%",fontWeight:700}}>{sending?"Sending OTP…":"📧 Send OTP to Email"}</button>
+          ):(
+            <>
+              <div style={{background:"#001a0f",border:`1px solid ${G.gr}`,borderRadius:10,padding:10,marginBottom:12,fontSize:12,color:G.gr}}>✅ OTP sent to {email}. Valid for 10 minutes.</div>
+              <FRow label="Enter OTP">
+                <input style={I} value={otp} onChange={e=>setOtp(e.target.value)} placeholder="6-digit OTP" maxLength={6}/>
+              </FRow>
+              <FRow label="New Password">
+                <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
+              </FRow>
+              <FRow label="Confirm New Password">
+                <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password"/>
+              </FRow>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={changeWithOtp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Reset Password</button>
+                <button onClick={()=>{setOtpSent(false);setOtp("");}} style={{...B(G.dim),flex:1}}>Resend</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 function LateApproval({user,D,P,ST,AN,setSc}) {
   const [reason,setReason]=useState("");
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
@@ -859,7 +1045,10 @@ function Dash({user,D,P,ST,AN,logout}) {
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
-        <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setSc("changepwd")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>🔑</button>
+          <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
+        </div>
       </div>
       <div style={{display:"flex",gap:5,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
         {tabs.map(([id,lb])=>(
@@ -1383,6 +1572,13 @@ function SC({D,P,ST}) {
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
               <button onClick={()=>startEdit(u)} style={{...B(G.bl),fontSize:11,padding:"6px 10px"}}>✏️ Edit</button>
+              <button onClick={()=>{
+                const np=prompt(`Reset password for ${u.name}:`);
+                if(!np)return;
+                if(np.length<6)return ST("Password must be at least 6 characters","error");
+                P({...D,users:D.users.map(x=>x.id===u.id?{...x,password:np,firstLogin:true}:x)});
+                ST(`✅ Password reset for ${u.name}. They will be asked to change on next login.`);
+              }} style={{...B(G.am),fontSize:11,padding:"6px 10px"}}>🔑 Reset</button>
               <button onClick={()=>{if(!confirm(`Remove ${u.name}?`))return;P({...D,users:D.users.filter(x=>x.id!==u.id)});ST("Removed!");}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"6px 10px"}}>✕</button>
             </div>
           </div>
