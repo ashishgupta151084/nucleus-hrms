@@ -930,8 +930,14 @@ function LV({D,vu}) {
       {lv.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30,fontSize:13}}>No live locations. Staff must be logged in.</div>}
       {lv.map(u=>{
         const loc=D.liveLocations[u.id],r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
-        const nr=D.offices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        const at=nr&&nr.d<=nr.radius,ago=Math.round((new Date()-new Date(loc.ts))/60000);
+        // Check user's assigned offices first, then all offices
+        const userOffices=(u.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
+        const checkOffices=userOffices.length>0?userOffices:D.offices;
+        const nr=checkOffices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
+        const at=nr&&nr.d<=nr.radius;
+        // Handle Firebase timestamp (can be object or string)
+        const locTs=loc.ts?.toDate?loc.ts.toDate():loc.ts?new Date(loc.ts):new Date();
+        const ago=Math.round((new Date()-locTs)/60000);
         return (
           <div key={u.id} style={{...K,border:sel===u.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
@@ -1246,69 +1252,142 @@ function SC({D,P,ST}) {
   const [editU,setEditU]=useState(null);
   const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",articleshipStart:""};
   const [f,setF]=useState(emptyF);
-  const add=()=>{
+
+  const save=()=>{
     if(!f.name||!f.email)return ST("Name and email required","error");
     if(editU){
       P({...D,users:D.users.map(u=>u.id===editU?{...u,...f}:u)});
-      ST("✅ Updated!");setEditU(null);
+      ST("✅ Updated!");
     } else {
       P({...D,users:[...D.users,{...f,id:gid()}]});
       ST("✅ Added!");
     }
-    setSa(false);setF(emptyF);
+    setSa(false);setEditU(null);setF(emptyF);
   };
-  const startEdit=(u)=>{setF({name:u.name,email:u.email,password:u.password||"",role:u.role,employeeType:u.employeeType||"employee",teamId:u.teamId||"",officeIds:u.officeIds||[],reportingTo:u.reportingTo||"",designation:u.designation||"",weeklyOff:u.weeklyOff||"sun_sat",articleshipStart:u.articleshipStart||""});setEditU(u.id);setSa(true);};
+
+  const startEdit=(u)=>{
+    setF({
+      name:u.name,email:u.email,password:u.password||"",
+      role:u.role,employeeType:u.employeeType||"employee",
+      teamId:u.teamId||"",officeIds:u.officeIds||[],
+      reportingTo:u.reportingTo||"",designation:u.designation||"",
+      weeklyOff:u.weeklyOff||"sun_sat",articleshipStart:u.articleshipStart||""
+    });
+    setEditU(u.id);setSa(true);
+    window.scrollTo(0,0);
+  };
+
+  const roleColor={admin:G.rd,hr:G.pu,hod:G.bl,manager:G.navyL,staff:G.card2};
+
   return (
     <>
-      <button onClick={()=>setSa(!sa)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Staff/Manager"}</button>
-      {sa&&(<div style={{...K,marginBottom:10}}>
-        <FRow label="Name"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="Priya Sharma"/></FRow>
-        <FRow label="Email"><input style={I} value={f.email} onChange={e=>setF({...f,email:e.target.value})} placeholder="priya@nucleusadvisors.in"/></FRow>
-        <FRow label="Password"><input style={I} value={f.password} onChange={e=>setF({...f,password:e.target.value})}/></FRow>
-        <FRow label="Role">
-          <select style={I} value={f.role} onChange={e=>setF({...f,role:e.target.value})}>
-            <option value="staff">Staff</option>
-            <option value="manager">Manager</option>
-            <option value="hod">HOD (Head of Department)</option>
-            <option value="hr">HR Manager</option>
-          </select>
-        </FRow>
-        <FRow label="Employee Type">
-          <select style={I} value={f.employeeType} onChange={e=>setF({...f,employeeType:e.target.value})}>
-            <option value="employee">Employee</option>
-            <option value="articled">Articled Assistant</option>
-          </select>
-        </FRow>
-        <FRow label="Designation (optional)">
-          <input style={I} value={f.designation||""} onChange={e=>setF({...f,designation:e.target.value})} placeholder="e.g. Senior Associate"/>
-        </FRow>
-        <FRow label="Weekly Off">
-          <select style={I} value={f.weeklyOff||"sun_sat"} onChange={e=>setF({...f,weeklyOff:e.target.value})}>
-            {WEEKLY_OFF_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </FRow>
-        {f.employeeType==="articled"&&(
-          <FRow label="Articleship Start Date">
-            <input type="date" style={I} value={f.articleshipStart||""} onChange={e=>setF({...f,articleshipStart:e.target.value})}/>
+      <button onClick={()=>{setSa(!sa);if(sa){setEditU(null);setF(emptyF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>
+        {sa&&!editU?"✕ Cancel":editU?"✕ Cancel Edit":"+ Add Staff"}
+      </button>
+
+      {sa&&(
+        <div style={{...K,marginBottom:12,border:`1px solid ${editU?G.bl:G.bdr}`}}>
+          <div style={{fontWeight:800,color:editU?G.bl:G.gold,marginBottom:10}}>
+            {editU?"✏️ Edit Staff":"👤 New Staff Member"}
+          </div>
+          <FRow label="Full Name">
+            <input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Priya Sharma"/>
           </FRow>
-        )}
-        <FRow label="Reporting Manager">
-          <select style={I} value={f.reportingTo||""} onChange={e=>setF({...f,reportingTo:e.target.value})}>
-            <option value="">No Reporting Manager</option>
-            {D.users.filter(u=>["manager","hod","hr","admin"].includes(u.role)).map(u=><option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]||u.role})</option>)}
-          </select>
-        </FRow>
-        <FRow label="Team"><select style={I} value={f.teamId} onChange={e=>setF({...f,teamId:e.target.value})}><option value="">No Team</option>{D.teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></FRow>
-        <FRow label="Offices"><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{D.offices.map(o=>{const s=f.officeIds.includes(o.id);return(<button key={o.id} onClick={()=>setF({...f,officeIds:s?f.officeIds.filter(i=>i!==o.id):[...f.officeIds,o.id]})} style={{...B(s?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:s?"#000":"#fff",border:s?"none":`1px solid ${G.bdr}`}}>{o.name}</button>);})}</div></FRow>
-        <button onClick={add} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Add</button>
-      </div>)}
-      {D.users.filter(u=>u.role!=="admin").map(u=>(
-        <div key={u.id} style={{...K,display:"flex",gap:10,alignItems:"flex-start"}}>
-          <div style={{width:38,height:38,borderRadius:"50%",background:u.role==="manager"?G.pu:G.navyL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{u.role==="manager"?"👔":"👤"}</div>
-          <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:13}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>{u.email}</div><div style={{fontSize:11,color:G.mut,marginTop:1}}>{D.teams.find(t=>t.id===u.teamId)?.name||"No team"} · {(u.officeIds||[]).length} office(s)</div><Chip bg={u.role==="manager"?G.pu:G.navyL} label={u.role.toUpperCase()} sm/></div>
-          <button onClick={()=>{if(!confirm("Remove?"))return;P({...D,users:D.users.filter(x=>x.id!==u.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>✕</button>
+          <FRow label="Email">
+            <input style={I} value={f.email} onChange={e=>setF({...f,email:e.target.value})} placeholder="priya@nucleusadvisors.in"/>
+          </FRow>
+          <FRow label="Password">
+            <input style={I} type="password" value={f.password} onChange={e=>setF({...f,password:e.target.value})}/>
+          </FRow>
+          <FRow label="Role">
+            <select style={I} value={f.role} onChange={e=>setF({...f,role:e.target.value})}>
+              <option value="staff">Staff</option>
+              <option value="manager">Manager</option>
+              <option value="hod">HOD (Head of Department)</option>
+              <option value="hr">HR Manager</option>
+            </select>
+          </FRow>
+          <FRow label="Employee Type">
+            <select style={I} value={f.employeeType} onChange={e=>setF({...f,employeeType:e.target.value})}>
+              <option value="employee">Employee</option>
+              <option value="articled">Articled Assistant (CA)</option>
+            </select>
+          </FRow>
+          <FRow label="Designation">
+            <input style={I} value={f.designation||""} onChange={e=>setF({...f,designation:e.target.value})} placeholder="e.g. Senior Associate"/>
+          </FRow>
+          <FRow label="Team">
+            <select style={I} value={f.teamId||""} onChange={e=>setF({...f,teamId:e.target.value})}>
+              <option value="">No Team</option>
+              {D.teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </FRow>
+          <FRow label="Reporting Manager">
+            <select style={I} value={f.reportingTo||""} onChange={e=>setF({...f,reportingTo:e.target.value})}>
+              <option value="">None</option>
+              {D.users.filter(u=>["manager","hod","hr","admin"].includes(u.role)&&u.id!==editU).map(u=>(
+                <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]||u.role})</option>
+              ))}
+            </select>
+          </FRow>
+          <FRow label="Weekly Off">
+            <select style={I} value={f.weeklyOff||"sun_sat"} onChange={e=>setF({...f,weeklyOff:e.target.value})}>
+              {WEEKLY_OFF_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </FRow>
+          <FRow label="Offices">
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {D.offices.map(o=>{
+                const sel=(f.officeIds||[]).includes(o.id);
+                return(
+                  <button key={o.id} onClick={()=>setF({...f,officeIds:sel?(f.officeIds||[]).filter(i=>i!==o.id):[...(f.officeIds||[]),o.id]})} style={{...B(sel?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:sel?"#000":"#fff",border:sel?"none":`1px solid ${G.bdr}`}}>
+                    {o.name}
+                  </button>
+                );
+              })}
+              {D.offices.length===0&&<div style={{fontSize:12,color:G.dim}}>Add offices first</div>}
+            </div>
+          </FRow>
+          {f.employeeType==="articled"&&(
+            <FRow label="Articleship Start Date">
+              <input type="date" style={I} value={f.articleshipStart||""} onChange={e=>setF({...f,articleshipStart:e.target.value})}/>
+            </FRow>
+          )}
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>
+              {editU?"💾 Save Changes":"➕ Add Staff"}
+            </button>
+            <button onClick={()=>{setSa(false);setEditU(null);setF(emptyF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
+          </div>
         </div>
-      ))}
+      )}
+
+      {D.users.filter(u=>u.role!=="admin").map(u=>{
+        const team=D.teams.find(t=>t.id===u.teamId);
+        const mgr=D.users.find(x=>x.id===u.reportingTo);
+        return(
+          <div key={u.id} style={{...K,display:"flex",gap:10,alignItems:"flex-start"}}>
+            <div style={{width:40,height:40,borderRadius:"50%",background:roleColor[u.role]||G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>
+              {u.role==="hr"?"🧑‍💼":u.role==="hod"?"🏛":u.role==="manager"?"👔":"👤"}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:13}}>{u.name}{u.designation&&<span style={{fontSize:11,color:G.mut,fontWeight:400}}> — {u.designation}</span>}</div>
+              <div style={{fontSize:11,color:G.dim,marginTop:1}}>{u.email}</div>
+              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).length} office(s)</div>
+              {mgr&&<div style={{fontSize:11,color:G.mut}}>Reports to: <span style={{color:G.gold}}>{mgr.name}</span></div>}
+              <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
+                <Chip bg={roleColor[u.role]||G.dim} label={ROLE_LABELS[u.role]||u.role} sm/>
+                <Chip bg={u.employeeType==="articled"?G.pu:G.bl} label={u.employeeType==="articled"?"Articled":"Employee"} sm/>
+                {u.weeklyOff&&<Chip bg={G.card2} label={WEEKLY_OFF_OPTIONS.find(o=>o.value===u.weeklyOff)?.label||u.weeklyOff} sm/>}
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+              <button onClick={()=>startEdit(u)} style={{...B(G.bl),fontSize:11,padding:"6px 10px"}}>✏️ Edit</button>
+              <button onClick={()=>{if(!confirm(`Remove ${u.name}?`))return;P({...D,users:D.users.filter(x=>x.id!==u.id)});ST("Removed!");}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"6px 10px"}}>✕</button>
+            </div>
+          </div>
+        );
+      })}
     </>
   );
 }
