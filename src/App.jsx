@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  db, getConfig, setConfig, onConfig,
+  getConfig, setConfig, onConfig,
   addAttendance, updateAttendance, onAttendance,
   addLeave, updateLeave, deleteLeave, onLeaves,
   addReg, updateReg, onRegs,
@@ -8,179 +8,43 @@ import {
   addNotification, updateNotification, onNotifications
 } from "./firebase";
 
-// ── OTP utility ──────────────────────────────────────
-const generateOTP=()=>Math.floor(100000+Math.random()*900000).toString();
-const otpStore={}; // in-memory OTP store {email: {otp, expires}}
-const sendOTP=async(email)=>{
-  const otp=generateOTP();
-  otpStore[email]={otp,expires:Date.now()+10*60*1000}; // 10 min expiry
-  await sendEmail(email,"Nucleus HRMS — Password Reset OTP",
-    `Your OTP for password reset is: ${otp}\n\nThis OTP is valid for 10 minutes.\n\nIf you did not request this, please ignore.`
-  );
-  return otp;
-};
-const verifyOTP=(email,otp)=>{
-  const stored=otpStore[email];
-  if(!stored)return false;
-  if(Date.now()>stored.expires)return false;
-  return stored.otp===otp;
-};
-
-// ── Email notification utility (EmailJS - free tier) ──────────────
-const sendEmail=async(to,subject,body)=>{
-  try{
-    // Using EmailJS public API - configure with your EmailJS account
-    const payload={
-      service_id:"service_nucleus",
-      template_id:"template_nucleus",
-      user_id:"YOUR_EMAILJS_PUBLIC_KEY", // Replace after EmailJS setup
-      template_params:{to_email:to,subject,message:body,from_name:"Nucleus HRMS"}
-    };
-    await fetch("https://api.emailjs.com/api/v1.0/email/send",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(payload)
-    });
-    console.log("Email sent to:",to);
-  }catch(e){console.warn("Email not sent:",e.message);}
-};
-
-// ── Notification + Email helper ───────────────────────────────────
-const notifyUser=async(uid,msg,type,email,subject)=>{
-  // In-app notification (always)
-  const rec={id:Math.random().toString(36).substr(2,9),userId:uid,msg,type,ts:new Date().toISOString(),read:false};
-  await addNotification(rec);
-  // Email notification (if email provided)
-  if(email&&subject){
-    await sendEmail(email,subject,msg);
-  }
-};
-
 const gid=()=>Math.random().toString(36).substr(2,9);
 const tod=()=>new Date().toISOString().split("T")[0];
 const fT=(d)=>new Date(d).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
 const fD=(d)=>new Date(d).toLocaleDateString([],{day:"2-digit",month:"short",year:"numeric"});
 const dist=(a,b,c,d)=>{const R=6371000,dL=((c-a)*Math.PI)/180,dl=((d-b)*Math.PI)/180,x=Math.sin(dL/2)**2+Math.cos((a*Math.PI)/180)*Math.cos((c*Math.PI)/180)*Math.sin(dl/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));};
 const lateBy=(ci,ss)=>{const [h,m]=ss.split(":").map(Number),s=new Date(ci);s.setHours(h,m,0,0);return Math.max(0,Math.round((new Date(ci)-s)/60000));};
-const GRACE_MINS=15; // Grace period in minutes
-const countMonthlyGrace=(attendance,userId,month)=>{
-  return (attendance||[]).filter(a=>
-    a.userId===userId &&
-    a.date&&a.date.startsWith(month) &&
-    a.graceUsed===true
-  ).length;
-};
 const wMin=(a,b)=>b?Math.round((new Date(b)-new Date(a))/60000):0;
 const wHr=(a,b)=>{const m=wMin(a,b);return m?`${Math.floor(m/60)}h${m%60}m`:null;};
 const wDM=(y,m)=>{let c=0;const d=new Date(y,m-1,1);while(d.getMonth()===m-1){if(d.getDay()&&d.getDay()<6)c++;d.setDate(d.getDate()+1);}return c;};
 const isHL=(ds,hs)=>(hs||[]).some(h=>h.date===ds);
-const isDayOff=(ds,hs,weeklyOff)=>isWE(ds,weeklyOff)||isHL(ds,hs);
-const getSatWeek=(d)=>{
-  // Which occurrence of Saturday in the month (1st,2nd,3rd,4th,5th)
-  return Math.ceil(d.getDate()/7);
-};
-const isWE=(ds,weeklyOff="sun_sat")=>{
-  const d=new Date(ds);
-  const day=d.getDay();
-  if(weeklyOff==="sun_sat") return day===0||day===6;
-  if(day===0) return true; // Sunday always off for all options below
-  if(day!==6) return false; // Not Saturday, not off
-  const wk=getSatWeek(d);
-  if(weeklyOff==="sun") return false;               // Only Sunday
-  if(weeklyOff==="sun_1stsat") return wk===1;
-  if(weeklyOff==="sun_2ndsat") return wk===2;
-  if(weeklyOff==="sun_3rdsat") return wk===3;
-  if(weeklyOff==="sun_4thsat") return wk===4;
-  if(weeklyOff==="sun_5thsat") return wk===5;
-  if(weeklyOff==="sun_altsat") return wk%2===1;     // 1st & 3rd Sat
-  if(weeklyOff==="sun_1st3rdsat") return wk===1||wk===3;
-  if(weeklyOff==="sun_2nd4thsat") return wk===2||wk===4;
-  return false;
-};
-const WEEKLY_OFF_OPTIONS=[
-  {value:"sun",label:"Sunday Only"},
-  {value:"sun_sat",label:"Saturday & Sunday (Full week off)"},
-  {value:"sun_1stsat",label:"Sunday + 1st Saturday"},
-  {value:"sun_2ndsat",label:"Sunday + 2nd Saturday"},
-  {value:"sun_3rdsat",label:"Sunday + 3rd Saturday"},
-  {value:"sun_4thsat",label:"Sunday + 4th Saturday"},
-  {value:"sun_5thsat",label:"Sunday + 5th Saturday"},
-  {value:"sun_altsat",label:"Sunday + Alternate Saturdays (1st & 3rd)"},
-  {value:"sun_1st3rdsat",label:"Sunday + 1st & 3rd Saturday"},
-  {value:"sun_2nd4thsat",label:"Sunday + 2nd & 4th Saturday"},
-];
+const isWE=(ds)=>{const d=new Date(ds);return!d.getDay()||d.getDay()===6;};
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
 const DP_EMP={casual:12,sick:12,compoff:6,halfday:24,early:12};
-// ICAI New Scheme 2024: 12 leaves per year, no casual/compoff for articled
-const DP_AA={
-  sick:12,        // 12 days per year as per ICAI new scheme
-  casual:0,       // Not allowed for articled
-  compoff:0,      // Not allowed for articled
-  halfday:0,      // Not allowed (ICAI requires full day)
-  early:0,        // Not allowed
-  studyleave:12,  // Allowed for exam prep (with principal consent)
-};
+const DP_AA={casual:0,sick:7,compoff:0,halfday:0,early:0};
 const DP={employee:DP_EMP,articled:DP_AA};
-// ICAI rules
-const ICAI_RULES={
-  maxLeavesPerYear:12,
-  workingHoursStart:"09:00",
-  workingHoursEnd:"19:00",
-  weeklyHours:35,
-  graceAllowed:false, // Stricter for articled
-  excessLeaveAction:"extend_articleship",
-};
-// Admin-only initial config — written to Firebase on first run
-const ADMIN_USER={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",teamId:null,officeIds:[],customShift:null,managedTeams:[],weeklyOff:"sun_sat",firstLogin:false};
-// Role hierarchy: admin > hr > hod > manager > staff
-const ROLES=["admin","hr","hod","manager","staff"];
-const ROLE_LABELS={admin:"Admin",hr:"HR Manager",hod:"HOD",manager:"Manager",staff:"Staff"};
-const INIT_CONFIG={
+const SEED={
   companyName:"Nucleus HRMS",
-  offices:[],
-  teams:[],
-  users:[ADMIN_USER],
-  leavePolicy:DP,
-  holidays:[
-    {id:"h1",date:"2026-01-26",name:"Republic Day"},
-    {id:"h2",date:"2026-08-15",name:"Independence Day"},
-    {id:"h3",date:"2026-10-02",name:"Gandhi Jayanti"},
-    {id:"h4",date:"2026-11-08",name:"Diwali"},
-    {id:"h5",date:"2026-12-25",name:"Christmas"},
+  offices:[{id:"o1",name:"Gurugram HQ",lat:28.4595,lng:77.0266,radius:50},{id:"o2",name:"Noida Branch",lat:28.5355,lng:77.391,radius:50}],
+  teams:[{id:"t1",name:"Investment Banking",shiftStart:"09:30",shiftEnd:"18:30"},{id:"t2",name:"Risk Advisory",shiftStart:"09:00",shiftEnd:"18:00"},{id:"t3",name:"Tax & Regulatory",shiftStart:"09:30",shiftEnd:"18:30"}],
+  users:[
+    {id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",teamId:null,officeIds:["o1","o2"],customShift:null,managedTeams:["t1","t2","t3"]},
+    {id:"u2",name:"Raj Sharma",email:"raj@nucleusadvisors.in",password:"pass123",role:"manager",employeeType:"employee",teamId:"t1",officeIds:["o1"],customShift:null,managedTeams:["t1","t2"]},
+    {id:"u3",name:"Priya Patel",email:"priya@nucleusadvisors.in",password:"pass123",role:"staff",employeeType:"employee",teamId:"t1",officeIds:["o1"],customShift:null},
+    {id:"u4",name:"Amit Singh",email:"amit@nucleusadvisors.in",password:"pass123",role:"staff",employeeType:"articled",teamId:"t2",officeIds:["o1","o2"],customShift:{shiftStart:"10:00",shiftEnd:"19:00"}},
   ],
+  attendance:[],leaves:[],liveLocations:{},leavePolicy:DP,
+  holidays:[{id:"h1",date:"2026-01-26",name:"Republic Day"},{id:"h2",date:"2026-08-15",name:"Independence Day"},{id:"h3",date:"2026-10-02",name:"Gandhi Jayanti"},{id:"h4",date:"2026-11-08",name:"Diwali"},{id:"h5",date:"2026-12-25",name:"Christmas"}],
+  notifications:[],regularizations:[],
 };
-// Runtime state (never stored in Firebase)
-const EMPTY_STATE={attendance:[],leaves:[],liveLocations:{},notifications:[],regularizations:[],loading:false};
 
-// Nucleus Advisors brand theme — navy + red + white
-const G={
-  bg:"#f0f4f8",        // Light grey background
-  card:"#ffffff",      // White cards
-  card2:"#f8fafc",     // Slightly off-white
-  bdr:"#dce4ef",       // Light border
-  navy:"#1a2a5e",      // Primary navy (brand)
-  navyL:"#2a3f8f",     // Lighter navy
-  navyD:"#0f1a3c",     // Darker navy
-  navyBg:"#eef1f9",    // Navy tint background
-  red:"#cc2222",       // Brand red (arrow in logo)
-  redL:"#e53333",      // Lighter red
-  txt:"#1a2a5e",       // Navy text
-  mut:"#4a5a80",       // Muted navy
-  dim:"#8a9bb5",       // Dimmed
-  gr:"#16a34a",        // Green
-  rd:"#dc2626",        // Error red
-  am:"#d97706",        // Amber
-  bl:"#2563eb",        // Blue
-  pu:"#7c3aed",        // Purple
-  gold:"#1a2a5e",      // Use navy as "gold" (primary accent)
-  goldL:"#2a3f8f",
-  goldD:"#0f1a3c",
-};
-const B=(bg,x={})=>({background:bg,color:bg==="#ffffff"||bg==="#f8fafc"||bg==="#fff"?"#1a2a5e":"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
-const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:"#fff",color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
-const L={fontSize:11,color:G.mut,marginBottom:5,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
-const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12,boxShadow:"0 1px 4px rgba(26,42,94,0.06)"};
+const G={bg:"#0a0f1e",card:"#111827",card2:"#1a2235",bdr:"#1e3a5f",gold:"#c9a84c",goldL:"#e8c97a",goldD:"#a07830",navy:"#0d1f3c",navyL:"#1a3a6b",txt:"#e8dcc8",mut:"#8a9bb5",dim:"#4a5a72",gr:"#10b981",rd:"#ef4444",am:"#f59e0b",bl:"#3b82f6",pu:"#8b5cf6"};
+const B=(bg,x={})=>({background:bg,color:"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
+const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:G.navy,color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
+const L={fontSize:11,color:G.mut,marginBottom:4,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
+const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12};
 
 const Chip=({bg,label,sm})=>(
   <span style={{background:bg,color:"#fff",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
@@ -189,153 +53,105 @@ const FRow=({label,children})=>(
   <div style={{marginBottom:12}}><label style={L}>{label}</label>{children}</div>
 );
 
-
-const Logo=({s=40,h})=>(
-  <div style={{display:"flex",alignItems:"center",gap:6}}>
-    <svg width={h||s} height={h||s} viewBox="0 0 40 20" fill="none">
-      <text x="0" y="16" fontFamily="Arial Black,sans-serif" fontSize="14" fontWeight="900" fill="#1B2F5E">N</text>
-      <line x1="11" y1="18" x2="11" y2="2" stroke="#cc2222" strokeWidth="3" strokeLinecap="round"/>
-      <polygon points="11,0 7,8 15,8" fill="#cc2222"/>
-      <text x="14" y="16" fontFamily="Arial Black,sans-serif" fontSize="14" fontWeight="900" fill="#1B2F5E">ucleus</text>
-    </svg>
-    <span style={{fontSize:9,fontWeight:800,color:"#1B2F5E",letterSpacing:"0.15em",textTransform:"uppercase",display:"block",marginTop:2}}>ADVISORS</span>
+const Logo=({s=32})=>(
+  <svg width={s} height={s} viewBox="0 0 40 40" fill="none">
+    <circle cx="20" cy="20" r="18" stroke={G.gold} strokeWidth="2.5" fill="none"/>
+    <circle cx="20" cy="20" r="6" fill={G.gold}/>
+    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(45 20 20)"/>
+    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(-45 20 20)"/>
+  </svg>
+);
+const Msg=({t})=>(
+  <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:t.type==="error"?G.rd:G.gr,color:"#fff",padding:"12px 24px",borderRadius:12,fontWeight:700,fontSize:14,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",whiteSpace:"nowrap",border:`1px solid ${G.gold}`}}>
+    {t.msg}
   </div>
 );
 
-export default function App() {
-  const [D,setD]=useState({...INIT_CONFIG,...EMPTY_STATE});
+function Cam({onDone,onCancel}) {
+  const vr=useRef(),cr=useRef(),sr=useRef();
+  const [ok,setOk]=useState(false),[err,setErr]=useState(null);
+  useEffect(()=>{
+    navigator.mediaDevices?.getUserMedia({video:{facingMode:"user"}})
+      .then(s=>{sr.current=s;if(vr.current){vr.current.srcObject=s;setOk(true);}})
+      .catch(()=>setErr("Camera denied. Please allow access."));
+    return()=>sr.current?.getTracks().forEach(t=>t.stop());
+  },[]);
+  const snap=()=>{
+    const v=vr.current,c=cr.current;if(!v||!c)return;
+    c.width=v.videoWidth;c.height=v.videoHeight;c.getContext("2d").drawImage(v,0,0);
+    sr.current?.getTracks().forEach(t=>t.stop());
+    onDone(c.toDataURL("image/jpeg",0.7));
+  };
+  if(err) return (
+    <div style={{textAlign:"center",padding:20,color:G.rd}}>
+      <div style={{fontSize:36}}>📷</div>
+      <p style={{fontSize:13}}>{err}</p>
+      <button onClick={onCancel} style={B(G.dim)}>Back</button>
+    </div>
+  );
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
+      <div style={{borderRadius:14,overflow:"hidden",width:"100%",maxWidth:300,background:"#000",border:`2px solid ${G.gold}`,position:"relative"}}>
+        <video ref={vr} autoPlay playsInline muted style={{width:"100%",display:"block"}}/>
+        {!ok&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",color:G.gold}}>Loading…</div>}
+      </div>
+      <canvas ref={cr} style={{display:"none"}}/>
+      <div style={{display:"flex",gap:10,width:"100%"}}>
+        <button onClick={onCancel} style={{...B(G.dim),flex:1}}>Cancel</button>
+        <button onClick={snap} disabled={!ok} style={{...B(ok?G.gold:"#555"),flex:2,color:ok?"#000":"#fff"}}>📸 Take Selfie</button>
+      </div>
+    </div>
+  );
+}
 
+export default function App() {
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[]});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
 
-  // ── Load config from Firebase on mount ──
   useEffect(()=>{
     const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
-        setD(prev=>({...prev,...cfg,loading:false}));
+        setD(prev=>({...prev,...cfg}));
       } else {
-        setConfig(INIT_CONFIG).catch(()=>{});
+        const init={companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,leavePolicy:SEED.leavePolicy,holidays:SEED.holidays};
+        setConfig(init).catch(()=>{});
       }
     });
     return unsub;
   },[]);
 
-  // ── Real-time attendance ──
-  useEffect(()=>{
-    const unsub=onAttendance(recs=>setD(prev=>({...prev,attendance:recs})));
-    return unsub;
-  },[]);
-
-  // ── Real-time leaves ──
-  useEffect(()=>{
-    const unsub=onLeaves(recs=>setD(prev=>({...prev,leaves:recs})));
-    return unsub;
-  },[]);
-
-  // ── Real-time regularizations ──
-  useEffect(()=>{
-    const unsub=onRegs(recs=>setD(prev=>({...prev,regularizations:recs})));
-    return unsub;
-  },[]);
-
-  // ── Real-time live locations ──
-  useEffect(()=>{
-    const unsub=onLiveLocations(locs=>setD(prev=>({...prev,liveLocations:locs})));
-    return unsub;
-  },[]);
-
-  // ── Real-time notifications for current user ──
+  useEffect(()=>{const unsub=onAttendance(r=>setD(p=>({...p,attendance:r})));return unsub;},[]);
+  useEffect(()=>{const unsub=onLeaves(r=>setD(p=>({...p,leaves:r})));return unsub;},[]);
+  useEffect(()=>{const unsub=onRegs(r=>setD(p=>({...p,regularizations:r})));return unsub;},[]);
+  useEffect(()=>{const unsub=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return unsub;},[]);
   useEffect(()=>{
     if(!cu)return;
-    const unsub=onNotifications(cu.id,notifs=>setD(prev=>({...prev,notifications:notifs})));
+    const unsub=onNotifications(cu.id,r=>setD(p=>({...p,notifications:r})));
     return unsub;
   },[cu?.id]);
-
-  // ── Auto escalation check (runs on load) ──
-  useEffect(()=>{
-    if(!cu||cu.role!=="admin"&&cu.role!=="hr")return;
-    const checkEscalations=()=>{
-      const now=new Date();
-      const pending=(D.leaves||[]).filter(l=>l.status==="pending");
-      pending.forEach(l=>{
-        const applied=new Date(l.appliedOn);
-        const daysPending=Math.floor((now-applied)/(1000*60*60*24));
-        // Escalate every 3 days
-        if(daysPending>0&&daysPending%3===0){
-          const lastEscalated=l.lastEscalated?new Date(l.lastEscalated):null;
-          const shouldEscalate=!lastEscalated||Math.floor((now-lastEscalated)/(1000*60*60*24))>=3;
-          if(shouldEscalate){
-            const mgr=D.users.find(u=>u.id===l.reportingTo||u.role==="hr");
-            if(mgr){
-              const msg=`⚠️ ESCALATION: ${l.userName}'s ${l.type} leave request (${l.from}) has been pending for ${daysPending} days. Please review.`;
-              addNotification({id:gid(),userId:mgr.id,msg,type:"escalation",ts:now.toISOString(),read:false});
-              if(mgr.email)sendEmail(mgr.email,"Pending Leave Escalation — Nucleus HRMS",msg);
-              updateLeave(l.id,{lastEscalated:now.toISOString(),escalationCount:(l.escalationCount||0)+1});
-            }
-          }
-        }
-      });
-      // Also check pending regularizations
-      const pendingRegs=(D.regularizations||[]).filter(r=>r.status==="pending");
-      pendingRegs.forEach(r=>{
-        const applied=new Date(r.appliedOn);
-        const daysPending=Math.floor((now-applied)/(1000*60*60*24));
-        if(daysPending>0&&daysPending%3===0){
-          const mgr=D.users.find(u=>u.id===r.reportingTo||u.role==="hr");
-          if(mgr){
-            const msg=`⚠️ ESCALATION: ${r.userName}'s ${r.type==="late_approval"?"late arrival approval":"regularization"} for ${r.date} pending for ${daysPending} days.`;
-            addNotification({id:gid(),userId:mgr.id,msg,type:"escalation",ts:now.toISOString(),read:false});
-          }
-        }
-      });
-    };
-    // Run on load and every hour
-    checkEscalations();
-    const interval=setInterval(checkEscalations,60*60*1000);
-    return()=>clearInterval(interval);
-  },[cu?.id,D.leaves,D.regularizations]);
-
-  // ── GPS tracking for staff/manager ──
   useEffect(()=>{
     if(!cu||cu.role==="admin")return;
     const w=navigator.geolocation?.watchPosition(p=>{
-      const loc={lat:p.coords.latitude,lng:p.coords.longitude,ac:Math.round(p.coords.accuracy),ts:new Date().toISOString()};
-      updateLiveLocation(cu.id,loc);
+      updateLiveLocation(cu.id,{lat:p.coords.latitude,lng:p.coords.longitude,ac:Math.round(p.coords.accuracy),ts:new Date().toISOString()});
     },null,{enableHighAccuracy:true,maximumAge:30000});
     return()=>navigator.geolocation?.clearWatch(w);
   },[cu?.id]);
 
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
-
-  // ── Persist: saves config fields (users, offices, teams, policy, holidays) to Firebase ──
   const P=useCallback(nd=>{
     setD(nd);
-    // Only sync config fields, not transactional data (handled separately)
     const {users,offices,teams,leavePolicy,holidays,companyName}=nd;
     setConfig({users,offices,teams,leavePolicy,holidays,companyName});
   },[]);
-
-  // ── Notification + Email helper ──
-  const AN=useCallback((uid,msg,type="info",emailSubject=null)=>{
-    const rec={id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false};
-    addNotification(rec);
-    // Send email if user has email
-    const targetUser=(D.users||[]).find(u=>u.id===uid);
-    if(targetUser?.email&&emailSubject){
-      sendEmail(targetUser.email,emailSubject,msg);
-    }
-  },[D.users]);
+  const AN=useCallback((uid,msg,type="info")=>{
+    addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
+  },[]);
 
   useEffect(()=>{
-    if(cu){
-      // Check if first login
-      const freshUser=(D.users||[]).find(u=>u.id===cu.id);
-      if(freshUser?.firstLogin===true){setSc("firstlogin");return;}
-      setSc(["admin","hr","hod","manager"].includes(cu.role)?cu.role==="admin"||cu.role==="hr"?"dash":"home":"home");
-    } else {
-      setSc("login");
-    }
+    if(cu) setSc(cu.role==="admin"?"dash":"home");
+    else setSc("login");
   },[cu]);
 
   const login=(e,p)=>{
@@ -343,28 +159,18 @@ export default function App() {
     if(!u)return ST("Invalid credentials","error");
     setCu(u);sv("nau5",u);
   };
-  const logout=()=>{
-    setCu(null);
-    sv("nau5",null);
-    setSc("login");
-    // Don't reset D — keeps config loaded so login screen works instantly
-  };
+  const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
   const unread=(D.notifications||[]).filter(n=>n.userId===cu?.id&&!n.read).length;
-
-
   const props={user:cu,D,P,ST,AN,logout,setSc,unread};
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}body{background:#f0f4f8}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#dce4ef;border-radius:3px}input::placeholder,textarea::placeholder{color:#8a9bb5}select option{background:#fff;color:#1a2a5e}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-      {sc==="login"&&<Login login={login} name={D.companyName} D={D} P={P} ST={ST} logout={logout}/>}
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+      {sc==="login"&&<Login login={login} name={D.companyName}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
       {sc==="lv"&&<Lv {...props}/>}
       {sc==="notif"&&<Notif {...props}/>}
       {sc==="reg"&&<Reg {...props}/>}
-      {sc==="lateapproval"&&<LateApproval {...props}/>}
-      {sc==="changepwd"&&<ChangePwd {...props} logout={logout}/>}
-      {sc==="firstlogin"&&<FirstLogin {...props} logout={logout}/>}
       {sc==="teamdash"&&<Dash {...props}/>}
       {sc==="dash"&&<Dash {...props}/>}
       {toast&&<Msg t={toast}/>}
@@ -373,35 +179,26 @@ export default function App() {
 }
 
 function Login({login,name}) {
-  const [e,setE]=useState("");
-  const [p,setP]=useState("");
+  const [e,setE]=useState(""),[p,setP]=useState("");
   return (
-    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:"linear-gradient(135deg,#eef1f9,#f8fafc)"}}>
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${G.bg},${G.navy})`}}>
       <div style={{width:"100%",maxWidth:400}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
-            <Logo s={40} full={true}/>
-          </div>
-          <div style={{fontSize:12,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.12em"}}>HR Management System</div>
-          <div style={{width:60,height:3,background:"#cc2222",margin:"10px auto 0",borderRadius:2}}/>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:10}}><Logo s={48}/><div style={{textAlign:"left"}}><div style={{fontSize:22,fontWeight:900,color:G.gold}}>Nucleus Advisors</div><div style={{fontSize:11,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.1em"}}>HR Management System</div></div></div>
+          <div style={{width:80,height:2,background:`linear-gradient(90deg,transparent,${G.gold},transparent)`,margin:"0 auto"}}/>
         </div>
-        <div style={{background:"#fff",borderRadius:20,padding:24,marginBottom:12,boxShadow:"0 4px 24px rgba(26,47,90,0.12)",border:`1px solid ${G.bdr}`}}>
+        <div style={{...K,padding:24,marginBottom:12}}>
           <FRow label="Email"><input style={I} type="email" value={e} onChange={x=>setE(x.target.value)} placeholder="you@nucleusadvisors.in"/></FRow>
           <FRow label="Password"><input style={I} type="password" value={p} onChange={x=>setP(x.target.value)} placeholder="••••••••" onKeyDown={x=>x.key==="Enter"&&login(e,p)}/></FRow>
-          <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.navy},${G.navyL})`),width:"100%",fontSize:15,padding:14,color:"#fff",fontWeight:800,borderRadius:12}}>Sign In →</button>
-          <div style={{textAlign:"center",marginTop:10}}>
-            <span onClick={()=>setShowForgot(true)} style={{fontSize:12,color:G.bl,cursor:"pointer",textDecoration:"underline"}}>Forgot Password?</span>
-          </div>
+          <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:"#000",fontWeight:800}}>Sign In →</button>
         </div>
-        {showForgot&&(
-          <div style={{...K,marginTop:12,padding:16}}>
-            <div style={{fontWeight:700,color:G.gold,marginBottom:8}}>📧 Reset via Email OTP</div>
-            <ChangePwd user={{email:e}} D={D} P={P} ST={ST} setSc={()=>setShowForgot(false)} logout={()=>setShowForgot(false)}/>
-          </div>
-        )}
-        <div style={{textAlign:"center",marginTop:8}}>
-          <div style={{fontSize:11,color:G.mut}}>Developed by <span style={{color:G.navy,fontWeight:700}}>Ashish Gupta</span></div>
-          <div style={{fontSize:10,color:G.dim,marginTop:4}}>© {new Date().getFullYear()} Nucleus Advisors. All rights reserved.</div>
+        <div style={{...K,padding:14}}>
+          <p style={{color:G.dim,fontSize:11,margin:"0 0 8px",fontWeight:700,textTransform:"uppercase"}}>Demo — tap to fill</p>
+          {[["ag@nucleusadvisors.in","Nucleus123#","👑 Admin"],["raj@nucleusadvisors.in","pass123","👔 Manager"],["priya@nucleusadvisors.in","pass123","👤 Staff"]].map(([em,pw,r])=>(
+            <div key={em} onClick={()=>{setE(em);setP(pw);}} style={{fontSize:12,color:G.mut,marginBottom:4,cursor:"pointer",padding:"4px 8px",borderRadius:6,background:G.navy}}>
+              <span style={{color:G.gold,fontWeight:700}}>{r}</span>: {em}
+            </div>
+          ))}
         </div>
         <div style={{textAlign:"center",marginTop:24,padding:"12px 0"}}>
           <div style={{fontSize:11,color:G.dim}}>Developed by</div>
@@ -415,109 +212,39 @@ function Login({login,name}) {
 }
 
 function Home({user,D,P,ST,AN,logout,setSc,unread}) {
-  const [step,setStep]=useState("idle");
-  const [selfie,setSelfie]=useState(null);
-  const [gps,setGps]=useState(null);
-  const [office,setOffice]=useState(null);
-  const [locErr,setLocErr]=useState(null);
-  const [wfh,setWfh]=useState(false);
+  const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
   const tm=D.teams.find(t=>t.id===user.teamId);
   const sh=user.customShift||(tm?{shiftStart:tm.shiftStart,shiftEnd:tm.shiftEnd}:null);
   const pl=(D.leaves||[]).filter(l=>l.userId===user.id&&l.status==="pending").length;
   const hol=isHL(tod(),D.holidays)?(D.holidays||[]).find(h=>h.date===tod())?.name:null;
   const now=new Date();
-  const onSelfie=async(img)=>{
+  const onSelfie=img=>{
     setSelfie(img);
     if(wfh){setStep("confirm");return;}
-    // Check GPS support first
-    if(!navigator.geolocation){
-      setLocErr("GPS is not supported on this device or browser.");
-      setStep("err");return;
-    }
     setStep("loc");
-    // Check permission status if API available
-    if(navigator.permissions){
-      try{
-        const perm=await navigator.permissions.query({name:"geolocation"});
-        if(perm.state==="denied"){
-          setLocErr("Location permission is blocked. Please enable it in your browser settings: Settings → Site Settings → Location → Allow.");
-          setStep("err");return;
-        }
-      }catch(e){}
-    }
-    // Get location with retry
-    const tryGetLocation=(attempt=1)=>{
-      navigator.geolocation.getCurrentPosition(
-        pos=>{
-          const{latitude:la,longitude:lo,accuracy}=pos.coords;
-          setGps({lat:la,lng:lo,accuracy});
-          // Check assigned offices
-          const assignedOffices=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
-          if(assignedOffices.length===0){
-            // No offices configured — allow WFH-style check-in
-            setOffice({name:"Remote / No Office Configured"});
-            setStep("confirm");
-            return;
-          }
-          // Find nearest office
-          const nearest=assignedOffices.reduce((b,o)=>{
-            const d=dist(la,lo,o.lat,o.lng);
-            return(!b||d<b.d)?{...o,d}:b;
-          },null);
-          const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=o.radius);
-          if(near){
-            setOffice(near);
-            setStep("confirm");
-          } else {
-            // Outside geofence — show error with distance
-            const distM=Math.round(nearest?.d||0);
-            setLocErr(`❌ Location mismatch: You are ${distM}m away from ${nearest?.name||"your office"}.\n\nYou must be within ${nearest?.radius||50}m to check in.\n\nIf you are working from home, please use the WFH option.`);
-            setStep("err");
-          }
-        },
-        (err)=>{
-          if(attempt<2){
-            // Retry once with lower accuracy
-            setTimeout(()=>tryGetLocation(attempt+1),1000);
-          } else {
-            const msgs={
-              1:"Location permission denied. Go to browser Settings → Site Settings → Location → Allow for this site.",
-              2:"GPS signal unavailable. Please move to an open area or enable WiFi for better accuracy.",
-              3:"Location request timed out. Please check your GPS settings and try again.",
-            };
-            setLocErr(msgs[err.code]||"Could not get your location. Please enable GPS and try again.");
-            setStep("err");
-          }
-        },
-        {enableHighAccuracy:true,timeout:attempt===1?15000:30000,maximumAge:0}
-      );
-    };
-    tryGetLocation();
+    navigator.geolocation?.getCurrentPosition(pos=>{
+      const{latitude:la,longitude:lo}=pos.coords;setGps({lat:la,lng:lo});
+      const near=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean).find(o=>dist(la,lo,o.lat,o.lng)<=o.radius);
+      if(near){setOffice(near);setStep("confirm");}else{setLocErr("Not within 50m of any assigned office.");setStep("err");}
+    },()=>{setLocErr("Could not get location.");setStep("err");},{enableHighAccuracy:true,timeout:15000});
   };
   const doIn=()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
-    const rec={id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh};
-    addAttendance(rec);
+    P({...D,attendance:[...D.attendance,{id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh}]});
     ST(wfh?"🏠 WFH done!":lb>30?`⚠️ ${lb}m late`:"✅ Checked in!");setStep("done");
   };
   const doOut=()=>{
-    const go=cg=>{updateAttendance(rec.id,{checkOut:new Date().toISOString(),checkOutGps:cg});ST("👋 Out!");};
+    const go=cg=>{P({...D,attendance:D.attendance.map(a=>a.id===rec.id?{...a,checkOut:new Date().toISOString(),checkOutGps:cg}:a)});ST("👋 Out!");};
     navigator.geolocation?.getCurrentPosition(p=>go({lat:p.coords.latitude,lng:p.coords.longitude}),()=>go(null));
   };
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
-      <div style={{background:"#1a2a5e",margin:"-20px -20px 18px",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <Logo s={28} full={false}/>
-          <div>
-            <div style={{fontSize:10,color:"#cc2222",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>Nucleus HRMS</div>
-            <div style={{fontSize:15,fontWeight:800,color:"#fff"}}>{user.name}</div>
-          </div>
-        </div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><Logo s={28}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>Nucleus Advisors</div><div style={{fontSize:16,fontWeight:800}}>{user.name}</div></div></div>
         <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setSc("notif")} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,padding:"8px 11px",fontSize:13,cursor:"pointer",position:"relative",color:"#fff"}}>{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:15,height:15,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{unread}</span>}🔔</button>
-          <button onClick={logout} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:12,padding:"8px 12px",cursor:"pointer",color:"#fff",fontWeight:600}}>Logout</button>
+          <button onClick={()=>setSc("notif")} style={{...B(G.card),padding:"8px 11px",border:`1px solid ${G.bdr}`,fontSize:13,position:"relative"}}>{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:15,height:15,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{unread}</span>}🔔</button>
+          <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Out</button>
         </div>
       </div>
       {(hol||isWE(tod()))&&(
@@ -526,8 +253,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           <div><div style={{color:G.gold,fontWeight:800,fontSize:14}}>{hol||"Weekend"}</div><div style={{color:G.mut,fontSize:12}}>No attendance needed</div></div>
         </div>
       )}
-      <div style={{background:"linear-gradient(135deg,#1a2a5e,#2a3f8f)",borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
-        <div style={{fontSize:40,fontWeight:900,color:"#fff"}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
+      <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
+        <div style={{fontSize:40,fontWeight:900,color:G.gold}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
         <div style={{color:G.mut,fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
         {sh&&<div style={{marginTop:8,background:"rgba(201,168,76,.15)",border:`1px solid ${G.gold}44`,borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:G.gold}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
@@ -553,17 +280,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                 <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Confirm Check-In ✓</button>
               </div>
             )}
-            {step==="err"&&(
-              <div style={{textAlign:"center"}}>
-                <div style={{fontSize:36,marginBottom:8}}>📍</div>
-                <p style={{color:G.rd,fontSize:13,marginBottom:8,lineHeight:1.5}}>{locErr}</p>
-                <div style={{display:"flex",gap:8,flexDirection:"column"}}>
-                  <button onClick={()=>setStep("cam")} style={{...B(G.gold),color:"#000",fontWeight:700}}>📸 Retry Check-In</button>
-                  <button onClick={()=>setWfh(true)||setStep("cam")} style={{...B(G.bl),fontSize:12}}>🏠 Switch to WFH Instead</button>
-                  <button onClick={()=>setStep("idle")} style={{...B(G.dim),fontSize:12}}>Cancel</button>
-                </div>
-              </div>
-            )}
+            {step==="err"&&<div style={{textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>🚫</div><p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p><button onClick={()=>setStep("idle")} style={B(G.dim)}>Try Again</button></div>}
           </>
         ):(
           <div>
@@ -576,16 +293,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         )}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[
-          ["History","hist"],
-          ["Leaves"+(pl>0?` (${pl})`:""),"lv"],
-          ["Regularize","reg"],
-          ["Notifications"+(unread>0?` (${unread})`:""),"notif"],
-          ...(user.role==="manager"||user.role==="hod"?[["My Team","teamdash"]]:[]),
-          ...(rec&&rec.lateBy>0&&!rec.checkOut?[["Request Late Approval","lateapproval"]]:[]),
-          ["Change Password","changepwd"],
-        ].map(([lb,s])=>(
-          <button key={s} onClick={()=>setSc(s)} style={{background:s==="lateapproval"?"#d97706":"#fff",color:s==="lateapproval"?"#fff":"#1a2a5e",border:s==="lateapproval"?"none":"1px solid #dce4ef",borderRadius:12,fontSize:12,padding:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 1px 3px rgba(26,42,94,0.08)"}}>{lb}</button>
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+          <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
     </div>
@@ -617,8 +326,7 @@ function Hist({user,D,setSc}) {
     const s=new Date(l.from),e=new Date(l.to||l.from);
     for(let d=new Date(s);d<=e;d.setDate(d.getDate()+1)){leaveMap[d.toISOString().split("T")[0]]=l;}
   });
-  const weeklyOff=user.weeklyOff||"sun_sat";
-  const workDays=allDays.filter(ds=>!isDayOff(ds,D.holidays,weeklyOff));
+  const workDays=allDays.filter(ds=>!isWE(ds)&&!isHL(ds,D.holidays));
   const present=workDays.filter(ds=>attMap[ds]&&(attMap[ds].status==="present"||attMap[ds].status==="wfh")).length;
   const late=workDays.filter(ds=>attMap[ds]&&attMap[ds].status==="late").length;
   const absent=workDays.filter(ds=>!attMap[ds]&&!leaveMap[ds]).length;
@@ -699,7 +407,7 @@ function Lv({user,D,P,ST,setSc}) {
   const [form,setForm]=useState({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
   const pol=(D.leavePolicy||DP)[(user.employeeType||'employee')]||DP_EMP;
   const used=t=>(D.leaves||[]).filter(l=>l.userId===user.id&&l.type===t&&l.status==="approved").length;
-  const tL={casual:"🏖 Casual",sick:"🤒 Sick",compoff:"🔄 CompOff",halfday:"🌓 Half Day",early:"🏃 Early",studyleave:"📚 Study Leave"};
+  const tL={casual:"🏖 Casual",sick:"🤒 Sick",compoff:"🔄 CompOff",halfday:"🌓 Half Day",early:"🏃 Early"};
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const apply=()=>{
     if(!form.reason.trim())return ST("Please add a reason","error");
@@ -752,7 +460,7 @@ function Lv({user,D,P,ST,setSc}) {
 
 function Notif({user,D,P,setSc}) {
   const ns=(D.notifications||[]).filter(n=>n.userId===user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts));
-  const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true}));
+  const markAll=()=>P({...D,notifications:(D.notifications||[]).map(n=>n.userId===user.id?{...n,read:true}:n)});
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -773,223 +481,11 @@ function Notif({user,D,P,setSc}) {
   );
 }
 
-
-
-function FirstLogin({user,D,P,ST,setSc,logout}) {
-  const [np,setNp]=useState("");
-  const [cp,setCp]=useState("");
-  const save=()=>{
-    if(!np||np.length<6)return ST("Password must be at least 6 characters","error");
-    if(np!==cp)return ST("Passwords do not match","error");
-    P({...D,users:D.users.map(u=>u.id===user.id?{...u,password:np,firstLogin:false}:u)});
-    const updated={...user,password:np,firstLogin:false};
-    ST("✅ Password set! Please login again.");
-    setTimeout(()=>logout(),1500);
-  };
-  return (
-    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{maxWidth:400,width:"100%"}}>
-        <div style={{...K,padding:24}}>
-          <div style={{textAlign:"center",marginBottom:20}}>
-            <div style={{fontSize:40,marginBottom:8}}>🔐</div>
-            <div style={{fontSize:18,fontWeight:800,color:G.gold}}>Set Your Password</div>
-            <div style={{fontSize:13,color:G.mut,marginTop:6}}>Welcome {user.name}! Please set a new password before continuing.</div>
-          </div>
-          <FRow label="New Password">
-            <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
-          </FRow>
-          <FRow label="Confirm Password">
-            <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter password" onKeyDown={e=>e.key==="Enter"&&save()}/>
-          </FRow>
-          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800,fontSize:15}}>Set Password & Continue →</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ChangePwd({user,D,P,ST,setSc,logout}) {
-  const [mode,setMode]=useState("menu"); // menu | current | otp
-  const [cur,setCur]=useState("");
-  const [np,setNp]=useState("");
-  const [cp,setCp]=useState("");
-  const [email,setEmail]=useState(user?.email||"");
-  const [otp,setOtp]=useState("");
-  const [otpSent,setOtpSent]=useState(false);
-  const [sending,setSending]=useState(false);
-
-  const changeWithCurrent=()=>{
-    const u=(D.users||[]).find(x=>x.id===user.id);
-    if(!u||cur!==u.password)return ST("Current password is incorrect","error");
-    if(!np||np.length<6)return ST("New password must be at least 6 characters","error");
-    if(np!==cp)return ST("Passwords do not match","error");
-    P({...D,users:D.users.map(x=>x.id===user.id?{...x,password:np}:x)});
-    ST("✅ Password changed successfully!");
-    setTimeout(()=>setSc(user.role==="admin"||user.role==="hr"?"dash":"home"),1500);
-  };
-
-  const sendOtp=async()=>{
-    const u=(D.users||[]).find(x=>x.email===email);
-    if(!u)return ST("Email not found","error");
-    setSending(true);
-    await sendOTP(email);
-    setOtpSent(true);setSending(false);
-    ST("✅ OTP sent to "+email);
-  };
-
-  const changeWithOtp=()=>{
-    if(!verifyOTP(email,otp))return ST("Invalid or expired OTP","error");
-    if(!np||np.length<6)return ST("New password must be at least 6 characters","error");
-    if(np!==cp)return ST("Passwords do not match","error");
-    const u=(D.users||[]).find(x=>x.email===email);
-    if(!u)return ST("User not found","error");
-    P({...D,users:D.users.map(x=>x.email===email?{...x,password:np}:x)});
-    ST("✅ Password reset successfully! Please login again.");
-    setTimeout(()=>logout(),1500);
-  };
-
-  const back=user?.role?()=>setSc(user.role==="admin"||user.role==="hr"?"dash":"home"):logout;
-
-  return (
-    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
-      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
-        <button onClick={back} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
-        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>🔑 Password Settings</h2>
-      </div>
-
-      {mode==="menu"&&(
-        <>
-          <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`,marginBottom:12}}>
-            <div style={{color:G.gold,fontWeight:700}}>Choose an option</div>
-            <div style={{fontSize:12,color:G.dim,marginTop:4}}>You can change your password using your current password or via email OTP.</div>
-          </div>
-          <div style={{...K,cursor:"pointer"}} onClick={()=>setMode("current")}>
-            <div style={{fontWeight:700,fontSize:14}}>🔐 Change using current password</div>
-            <div style={{fontSize:12,color:G.dim,marginTop:4}}>You know your current password</div>
-          </div>
-          <div style={{...K,cursor:"pointer"}} onClick={()=>setMode("otp")}>
-            <div style={{fontWeight:700,fontSize:14}}>📧 Reset via Email OTP</div>
-            <div style={{fontSize:12,color:G.dim,marginTop:4}}>Forgot password or want to reset securely</div>
-          </div>
-        </>
-      )}
-
-      {mode==="current"&&(
-        <div style={K}>
-          <button onClick={()=>setMode("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button>
-          <FRow label="Current Password">
-            <input type="password" style={I} value={cur} onChange={e=>setCur(e.target.value)} placeholder="Enter current password"/>
-          </FRow>
-          <FRow label="New Password">
-            <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
-          </FRow>
-          <FRow label="Confirm New Password">
-            <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password" onKeyDown={e=>e.key==="Enter"&&changeWithCurrent()}/>
-          </FRow>
-          <button onClick={changeWithCurrent} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Change Password</button>
-        </div>
-      )}
-
-      {mode==="otp"&&(
-        <div style={K}>
-          <button onClick={()=>setMode("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button>
-          <FRow label="Your Email">
-            <input style={I} value={email} onChange={e=>setEmail(e.target.value)} placeholder="your@email.com"/>
-          </FRow>
-          {!otpSent?(
-            <button onClick={sendOtp} style={{...B(G.bl),width:"100%",fontWeight:700}}>{sending?"Sending OTP…":"📧 Send OTP to Email"}</button>
-          ):(
-            <>
-              <div style={{background:"#001a0f",border:`1px solid ${G.gr}`,borderRadius:10,padding:10,marginBottom:12,fontSize:12,color:G.gr}}>✅ OTP sent to {email}. Valid for 10 minutes.</div>
-              <FRow label="Enter OTP">
-                <input style={I} value={otp} onChange={e=>setOtp(e.target.value)} placeholder="6-digit OTP" maxLength={6}/>
-              </FRow>
-              <FRow label="New Password">
-                <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/>
-              </FRow>
-              <FRow label="Confirm New Password">
-                <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password"/>
-              </FRow>
-              <div style={{display:"flex",gap:8}}>
-                <button onClick={changeWithOtp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Reset Password</button>
-                <button onClick={()=>{setOtpSent(false);setOtp("");}} style={{...B(G.dim),flex:1}}>Resend</button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-function LateApproval({user,D,P,ST,AN,setSc}) {
-  const [reason,setReason]=useState("");
-  const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
-  const reportingMgr=D.users.find(u=>u.id===user.reportingTo);
-
-  const submit=()=>{
-    if(!reason.trim())return ST("Please provide a reason","error");
-    if(!rec)return ST("No attendance record found for today","error");
-    // Create regularization request for late approval
-    const reg={
-      id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
-      date:tod(),checkIn:rec.checkIn.split("T")[1].substr(0,5),
-      checkOut:"18:30",reason,
-      type:"late_approval",
-      lateBy:rec.lateBy,
-      appliedOn:new Date().toISOString(),status:"pending"
-    };
-    addReg(reg);
-    // Notify reporting manager
-    if(reportingMgr){
-      AN(reportingMgr.id,`${user.name} has requested late arrival approval for today (${rec.lateBy} mins late). Reason: ${reason}`,"info","Late Approval Request — Nucleus HRMS");
-    }
-    ST("✅ Late approval request sent to your manager!");
-    setSc("home");
-  };
-
-  if(!rec||rec.lateBy<=0) return (
-    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
-      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
-        <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
-        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Late Approval</h2>
-      </div>
-      <div style={{...K,textAlign:"center",padding:32}}>
-        <div style={{fontSize:40,marginBottom:12}}>✅</div>
-        <div style={{fontWeight:700,fontSize:15}}>No late arrival today</div>
-        <div style={{color:G.dim,fontSize:13,marginTop:6}}>You are not marked late today.</div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
-      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
-        <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
-        <h2 style={{margin:0,fontSize:17,fontWeight:800,color:G.am}}>Late Approval Request</h2>
-      </div>
-      <div style={{...K,background:"#1a0f00",border:`1px solid ${G.am}`,marginBottom:12}}>
-        <div style={{color:G.am,fontWeight:700,fontSize:14}}>⚠️ Late by {rec.lateBy} minutes today</div>
-        <div style={{color:G.mut,fontSize:12,marginTop:4}}>Check-in time: {fT(rec.checkIn)}</div>
-        {reportingMgr&&<div style={{color:G.mut,fontSize:12,marginTop:2}}>Request will be sent to: <span style={{color:G.gold,fontWeight:700}}>{reportingMgr.name}</span></div>}
-      </div>
-      <div style={K}>
-        <div style={{fontWeight:800,marginBottom:12,color:G.gold}}>Reason for Late Arrival</div>
-        <FRow label="Reason">
-          <textarea style={{...I,resize:"vertical",minHeight:100}} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Please explain why you were late today…"/>
-        </FRow>
-        <div style={{fontSize:12,color:G.dim,marginBottom:12}}>
-          ℹ️ If approved by your manager, your attendance will be automatically regularized and the late mark will be removed.
-        </div>
-        <button onClick={submit} style={{...B(`linear-gradient(135deg,${G.am},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Send Approval Request</button>
-      </div>
-    </div>
-  );
-}
 function Reg({user,D,P,ST,setSc}) {
   const [f,setF]=useState({date:tod(),reason:"",checkIn:"09:30",checkOut:"18:30"});
   const submit=()=>{
     if(!f.reason.trim())return ST("Please add reason","error");
-    addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"});
+    P({...D,regularizations:[...(D.regularizations||[]),{id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"}]});
     ST("📝 Submitted!");setSc("home");
   };
   return (
@@ -1010,32 +506,17 @@ function Reg({user,D,P,ST,setSc}) {
 
 function Dash({user,D,P,ST,AN,logout}) {
   const [tab,setTab]=useState("ov");
-  const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["org","Hierarchy"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["org","Hierarchy"]];
-  const isHR=user.role==="hr";
-  const isHOD=user.role==="hod";
-  const vu=isA||isHR
-    ?D.users.filter(u=>u.role!=="admin")
-    :isHOD
-    ?D.users.filter(u=>u.teamId===user.teamId&&u.role!=="admin")
-    :D.users.filter(u=>u.reportingTo===user.id||((user.managedTeams||[]).includes(u.teamId)&&u.role==="staff"));
+  const isA=user.role==="admin";
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
+  const vu=isA?D.users.filter(u=>u.role!=="admin"):D.users.filter(u=>u.role==="staff"&&(user.managedTeams||[]).includes(u.teamId));
   const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const tp={D,P,ST,AN,vu,isA};
   return (
-    <div style={{maxWidth:500,margin:"0 auto",padding:"0 0 80px"}}>
-      <div style={{background:"#1a2a5e",padding:"16px 16px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          <Logo s={26} full={false}/>
-          <div>
-            <div style={{fontSize:10,color:"#cc2222",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div>
-            <div style={{fontSize:16,fontWeight:900,color:"#fff"}}>{user.name}</div>
-          </div>
-        </div>
-        <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setSc("changepwd")} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:11,padding:"7px 10px",cursor:"pointer",color:"#fff"}}>🔑</button>
-          <button onClick={logout} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:12,padding:"8px 12px",cursor:"pointer",color:"#fff",fontWeight:600}}>Logout</button>
-        </div>
+    <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
+        <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
       </div>
       <div style={{display:"flex",gap:5,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
         {tabs.map(([id,lb])=>(
@@ -1057,7 +538,6 @@ function Dash({user,D,P,ST,AN,logout}) {
       {tab==="st"&&isA&&<SC {...tp}/>}
       {tab==="tm"&&isA&&<TC {...tp}/>}
       {tab==="of"&&isA&&<OC {...tp}/>}
-      {tab==="org"&&<ORG {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
     </div>
   );
@@ -1106,14 +586,8 @@ function LV({D,vu}) {
       {lv.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30,fontSize:13}}>No live locations. Staff must be logged in.</div>}
       {lv.map(u=>{
         const loc=D.liveLocations[u.id],r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
-        // Check user's assigned offices first, then all offices
-        const userOffices=(u.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
-        const checkOffices=userOffices.length>0?userOffices:D.offices;
-        const nr=checkOffices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        const at=nr&&nr.d<=nr.radius;
-        // Handle Firebase timestamp (can be object or string)
-        const locTs=loc.ts?.toDate?loc.ts.toDate():loc.ts?new Date(loc.ts):new Date();
-        const ago=Math.round((new Date()-locTs)/60000);
+        const nr=D.offices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
+        const at=nr&&nr.d<=nr.radius,ago=Math.round((new Date()-new Date(loc.ts))/60000);
         return (
           <div key={u.id} style={{...K,border:sel===u.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
@@ -1140,9 +614,7 @@ function LV({D,vu}) {
 }
 
 function AT({D,vu,P,ST}) {
-  const [fd,setFd]=useState(tod());
-  const [fu,setFu]=useState("all");
-  const [sel,setSel]=useState(null);
+  const [fd,setFd]=useState(tod()),[fu,setFu]=useState("all"),[sel,setSel]=useState(null);
   const recs=D.attendance.filter(a=>{if(fd&&a.date!==fd)return false;if(fu!=="all"&&a.userId!==fu)return false;return vu.some(u=>u.id===a.userId);}).sort((a,b)=>new Date(b.checkIn)-new Date(a.checkIn));
   const exp=()=>{
     const rows=[["Name","Date","In","Out","Hours","Late","Office","WFH","Status"],...recs.map(r=>[r.userName,r.date,fT(r.checkIn),r.checkOut?fT(r.checkOut):"",r.checkOut?wHr(r.checkIn,r.checkOut):"",r.lateBy||0,r.officeName||"",r.isWFH?"Y":"N",r.status])].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
@@ -1150,9 +622,8 @@ function AT({D,vu,P,ST}) {
   };
   const mk=(uid,status)=>{
     const ex=D.attendance.find(a=>a.userId===uid&&a.date===fd);
-    if(ex){updateAttendance(ex.id,{status});}
-    else{addAttendance({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
-    ST(`Marked ${status}`);
+    const na=ex?D.attendance.map(a=>a.id===ex.id?{...a,status}:a):[...D.attendance,{id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0}];
+    P({...D,attendance:na});ST(`Marked ${status}`);
   };
   const sb={present:G.gr,late:G.am,wfh:G.bl,absent:G.rd};
   return (
@@ -1197,20 +668,16 @@ function AT({D,vu,P,ST}) {
 }
 
 function LT({D,vu,P,ST,AN,isA}) {
-  const [fl,setFl]=useState("pending");
-  const [eid,setEid]=useState(null);
-  const [ef,setEf]=useState(null);
+  const [fl,setFl]=useState("pending"),[eid,setEid]=useState(null),[ef,setEf]=useState(null);
   const lvs=(D.leaves||[]).filter(l=>vu.some(u=>u.id===l.userId)&&(fl==="all"||l.status===fl)).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
   const pd=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const tL={casual:"🏖",sick:"🤒",compoff:"🔄",halfday:"🌓",early:"🏃"};
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const cs=(id,st)=>{
-    updateLeave(id,{status:st,reviewedOn:new Date().toISOString()});
+    const nl=(D.leaves||[]).map(l=>l.id===id?{...l,status:st,reviewedOn:new Date().toISOString()}:l);
+    P({...D,leaves:nl});
     const l=(D.leaves||[]).find(x=>x.id===id);
-    if(l){
-      const emailSubject=`Leave ${st.charAt(0).toUpperCase()+st.slice(1)} — Nucleus HRMS`;
-      AN(l.userId,`Your ${l.type} leave from ${l.from}${l.to&&l.to!==l.from?" to "+l.to:""} has been ${st}.`,st==="approved"?"success":"error",emailSubject);
-    }
+    if(l)AN(l.userId,`Your ${l.type} leave has been ${st}.`,st==="approved"?"success":"error");
     ST(st==="approved"?"✅ Approved!":st==="rejected"?"❌ Rejected":"↩️ Pending");
   };
   return (
@@ -1245,7 +712,7 @@ function LT({D,vu,P,ST,AN,isA}) {
                   {l.status==="approved"&&<button onClick={()=>cs(l.id,"pending")} style={{...B(G.am),fontSize:11,padding:"5px 9px"}}>↩️ Unapprove</button>}
                   {l.status==="rejected"&&<button onClick={()=>cs(l.id,"approved")} style={{...B(G.gr),fontSize:11,padding:"5px 9px"}}>✅ Approve</button>}
                   {isA&&<button onClick={()=>{setEid(l.id);setEf({type:l.type,from:l.from,to:l.to||l.from,status:l.status,note:l.reviewNote||"",reason:l.reason});}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>}
-                  {isA&&<button onClick={()=>{if(!confirm("Delete?"))return;deleteLeave(l.id);ST("Deleted");}} style={{...B(G.dim),fontSize:11,padding:"5px 9px"}}>🗑</button>}
+                  {isA&&<button onClick={()=>{if(!confirm("Delete?"))return;P({...D,leaves:(D.leaves||[]).filter(x=>x.id!==l.id)});ST("Deleted");}} style={{...B(G.dim),fontSize:11,padding:"5px 9px"}}>🗑</button>}
                 </div>
               </>
             )}
@@ -1261,22 +728,13 @@ function RT({D,vu,P,ST,AN}) {
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const ap=(id)=>{
     const r=(D.regularizations||[]).find(x=>x.id===id);if(!r)return;
-    if(r.type==="late_approval"){
-      // Late approval: update existing attendance record, clear late mark
-      const existingAtt=D.attendance.find(a=>a.userId===r.userId&&a.date===r.date);
-      if(existingAtt){updateAttendance(existingAtt.id,{status:"present",lateBy:0,lateApproved:true,graceUsed:false});}
-    } else {
-      // Regular regularization: add new attendance record
-      const newRec={id:gid(),userId:r.userId,userName:r.userName,teamId:r.teamId,date:r.date,checkIn:new Date(`${r.date}T${r.checkIn}`).toISOString(),checkOut:new Date(`${r.date}T${r.checkOut}`).toISOString(),officeName:"Regularized",status:"present",lateBy:0};
-      addAttendance(newRec);
-    }
-    updateReg(id,{status:"approved",reviewedOn:new Date().toISOString()});
-    AN(r.userId,`Your ${r.type==="late_approval"?"late arrival approval":"regularization"} for ${r.date} has been approved. Attendance updated.`,"success");
-    ST("✅ Approved & attendance updated!");
+    const na=[...D.attendance,{id:gid(),userId:r.userId,userName:r.userName,teamId:r.teamId,date:r.date,checkIn:new Date(`${r.date}T${r.checkIn}`).toISOString(),checkOut:new Date(`${r.date}T${r.checkOut}`).toISOString(),officeName:"Regularized",status:"present",lateBy:0}];
+    P({...D,attendance:na,regularizations:(D.regularizations||[]).map(x=>x.id===id?{...x,status:"approved"}:x)});
+    AN(r.userId,`Regularization for ${r.date} approved.`,"success");ST("✅ Approved!");
   };
   const rj=(id)=>{
     const r=(D.regularizations||[]).find(x=>x.id===id);
-    updateReg(id,{status:"rejected",reviewedOn:new Date().toISOString()});
+    P({...D,regularizations:(D.regularizations||[]).map(x=>x.id===id?{...x,status:"rejected"}:x)});
     if(r)AN(r.userId,`Regularization for ${r.date} rejected.`,"error");ST("❌ Rejected");
   };
   return (
@@ -1312,8 +770,8 @@ function PT({D,vu,ST}) {
     return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",wd,pr,lt,wf,hd,cl,sl,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
   const exp=()=>{
-    const h=["Name","Email","Team","Designation","Reporting To","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent Days","Late (Unregularized)","LOP Days","Grace Used","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
-    const dr=rows.map(r=>[r.name,r.email,r.team,r.designation,r.reportingTo,r.wd,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lopLate,r.totalLOP,r.graceUsed,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
+    const h=["Name","Email","Team","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
+    const dr=rows.map(r=>[r.name,r.email,r.team,r.wd,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
     const csv=[h,...dr].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=`Nucleus_Payroll_${ms[mo-1]}_${yr}.csv`;a.click();ST("💰 Payroll exported!");
   };
@@ -1404,8 +862,7 @@ function PC({D,P,ST}) {
 }
 
 function HC({D,P,ST}) {
-  const [sa,setSa]=useState(false);
-  const [f,setF]=useState({date:"",name:""});
+  const [sa,setSa]=useState(false),[f,setF]=useState({date:"",name:""});
   const hs=(D.holidays||[]).sort((a,b)=>a.date.localeCompare(b.date));
   const add=()=>{if(!f.date||!f.name)return ST("Date and name required","error");P({...D,holidays:[...(D.holidays||[]),{...f,id:gid()}]});ST("Added!");setSa(false);setF({date:"",name:""});};
   return (
@@ -1424,169 +881,34 @@ function HC({D,P,ST}) {
 }
 
 function SC({D,P,ST}) {
-  const [sa,setSa]=useState(false);
-  const [editU,setEditU]=useState(null);
-  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",articleshipStart:""};
-  const [f,setF]=useState(emptyF);
-
-  const save=()=>{
-    if(!f.name||!f.email)return ST("Name and email required","error");
-    if(editU){
-      P({...D,users:D.users.map(u=>u.id===editU?{...u,...f}:u)});
-      ST("✅ Updated!");
-    } else {
-      P({...D,users:[...D.users,{...f,id:gid()}]});
-      ST("✅ Added!");
-    }
-    setSa(false);setEditU(null);setF(emptyF);
-  };
-
-  const startEdit=(u)=>{
-    setF({
-      name:u.name,email:u.email,password:u.password||"",
-      role:u.role,employeeType:u.employeeType||"employee",
-      teamId:u.teamId||"",officeIds:u.officeIds||[],
-      reportingTo:u.reportingTo||"",designation:u.designation||"",
-      weeklyOff:u.weeklyOff||"sun_sat",articleshipStart:u.articleshipStart||""
-    });
-    setEditU(u.id);setSa(true);
-    window.scrollTo(0,0);
-  };
-
-  const roleColor={admin:G.rd,hr:G.pu,hod:G.bl,manager:G.navyL,staff:G.card2};
-
+  const [sa,setSa]=useState(false),[f,setF]=useState({name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[]});
+  const add=()=>{if(!f.name||!f.email)return ST("Name and email required","error");P({...D,users:[...D.users,{...f,id:gid()}]});ST("Added!");setSa(false);setF({name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[]});};
   return (
     <>
-      <button onClick={()=>{setSa(!sa);if(sa){setEditU(null);setF(emptyF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>
-        {sa&&!editU?"✕ Cancel":editU?"✕ Cancel Edit":"+ Add Staff"}
-      </button>
-
-      {sa&&(
-        <div style={{...K,marginBottom:12,border:`1px solid ${editU?G.bl:G.bdr}`}}>
-          <div style={{fontWeight:800,color:editU?G.bl:G.gold,marginBottom:10}}>
-            {editU?"✏️ Edit Staff":"👤 New Staff Member"}
-          </div>
-          <FRow label="Full Name">
-            <input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Priya Sharma"/>
-          </FRow>
-          <FRow label="Email">
-            <input style={I} value={f.email} onChange={e=>setF({...f,email:e.target.value})} placeholder="priya@nucleusadvisors.in"/>
-          </FRow>
-          <FRow label="Password">
-            <input style={I} type="password" value={f.password} onChange={e=>setF({...f,password:e.target.value})}/>
-          </FRow>
-          <FRow label="Role">
-            <select style={I} value={f.role} onChange={e=>setF({...f,role:e.target.value})}>
-              <option value="staff">Staff</option>
-              <option value="manager">Manager</option>
-              <option value="hod">HOD (Head of Department)</option>
-              <option value="hr">HR Manager</option>
-            </select>
-          </FRow>
-          <FRow label="Employee Type">
-            <select style={I} value={f.employeeType} onChange={e=>setF({...f,employeeType:e.target.value})}>
-              <option value="employee">Employee</option>
-              <option value="articled">Articled Assistant (CA)</option>
-            </select>
-          </FRow>
-          <FRow label="Designation">
-            <input style={I} value={f.designation||""} onChange={e=>setF({...f,designation:e.target.value})} placeholder="e.g. Senior Associate"/>
-          </FRow>
-          <FRow label="Team">
-            <select style={I} value={f.teamId||""} onChange={e=>setF({...f,teamId:e.target.value})}>
-              <option value="">No Team</option>
-              {D.teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          </FRow>
-          <FRow label="Reporting Manager">
-            <select style={I} value={f.reportingTo||""} onChange={e=>setF({...f,reportingTo:e.target.value})}>
-              <option value="">None</option>
-              {D.users.filter(u=>["manager","hod","hr","admin"].includes(u.role)&&u.id!==editU).map(u=>(
-                <option key={u.id} value={u.id}>{u.name} ({ROLE_LABELS[u.role]||u.role})</option>
-              ))}
-            </select>
-          </FRow>
-          <FRow label="Weekly Off">
-            <select style={I} value={f.weeklyOff||"sun_sat"} onChange={e=>setF({...f,weeklyOff:e.target.value})}>
-              {WEEKLY_OFF_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </FRow>
-          <FRow label="Offices">
-            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-              {D.offices.map(o=>{
-                const sel=(f.officeIds||[]).includes(o.id);
-                return(
-                  <button key={o.id} onClick={()=>setF({...f,officeIds:sel?(f.officeIds||[]).filter(i=>i!==o.id):[...(f.officeIds||[]),o.id]})} style={{...B(sel?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:sel?"#000":"#fff",border:sel?"none":`1px solid ${G.bdr}`}}>
-                    {o.name}
-                  </button>
-                );
-              })}
-              {D.offices.length===0&&<div style={{fontSize:12,color:G.dim}}>Add offices first</div>}
-            </div>
-          </FRow>
-          {f.employeeType==="articled"&&(
-            <FRow label="Articleship Start Date">
-              <input type="date" style={I} value={f.articleshipStart||""} onChange={e=>setF({...f,articleshipStart:e.target.value})}/>
-            </FRow>
-          )}
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>
-              {editU?"💾 Save Changes":"➕ Add Staff"}
-            </button>
-            <button onClick={()=>{setSa(false);setEditU(null);setF(emptyF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
-          </div>
+      <button onClick={()=>setSa(!sa)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Staff/Manager"}</button>
+      {sa&&(<div style={{...K,marginBottom:10}}>
+        <FRow label="Name"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="Priya Sharma"/></FRow>
+        <FRow label="Email"><input style={I} value={f.email} onChange={e=>setF({...f,email:e.target.value})} placeholder="priya@nucleusadvisors.in"/></FRow>
+        <FRow label="Password"><input style={I} value={f.password} onChange={e=>setF({...f,password:e.target.value})}/></FRow>
+        <FRow label="Role"><select style={I} value={f.role} onChange={e=>setF({...f,role:e.target.value})}><option value="staff">Staff</option><option value="manager">Manager</option></select></FRow>
+        <FRow label="Employee Type"><select style={I} value={f.employeeType} onChange={e=>setF({...f,employeeType:e.target.value})}><option value="employee">Employee</option><option value="articled">Articled Assistant</option></select></FRow>
+        <FRow label="Team"><select style={I} value={f.teamId} onChange={e=>setF({...f,teamId:e.target.value})}><option value="">No Team</option>{D.teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></FRow>
+        <FRow label="Offices"><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{D.offices.map(o=>{const s=f.officeIds.includes(o.id);return(<button key={o.id} onClick={()=>setF({...f,officeIds:s?f.officeIds.filter(i=>i!==o.id):[...f.officeIds,o.id]})} style={{...B(s?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:s?"#000":"#fff",border:s?"none":`1px solid ${G.bdr}`}}>{o.name}</button>);})}</div></FRow>
+        <button onClick={add} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Add</button>
+      </div>)}
+      {D.users.filter(u=>u.role!=="admin").map(u=>(
+        <div key={u.id} style={{...K,display:"flex",gap:10,alignItems:"flex-start"}}>
+          <div style={{width:38,height:38,borderRadius:"50%",background:u.role==="manager"?G.pu:G.navyL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{u.role==="manager"?"👔":"👤"}</div>
+          <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:13}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>{u.email}</div><div style={{fontSize:11,color:G.mut,marginTop:1}}>{D.teams.find(t=>t.id===u.teamId)?.name||"No team"} · {(u.officeIds||[]).length} office(s)</div><Chip bg={u.role==="manager"?G.pu:G.navyL} label={u.role.toUpperCase()} sm/></div>
+          <button onClick={()=>{if(!confirm("Remove?"))return;P({...D,users:D.users.filter(x=>x.id!==u.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>✕</button>
         </div>
-      )}
-
-      {D.users.filter(u=>u.role!=="admin").map(u=>{
-        const team=D.teams.find(t=>t.id===u.teamId);
-        const mgr=D.users.find(x=>x.id===u.reportingTo);
-        return(
-          <div key={u.id} style={{...K,display:"flex",gap:10,alignItems:"flex-start"}}>
-            <div style={{width:40,height:40,borderRadius:"50%",background:roleColor[u.role]||G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>
-              {u.role==="hr"?"🧑‍💼":u.role==="hod"?"🏛":u.role==="manager"?"👔":"👤"}
-            </div>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontWeight:700,fontSize:13}}>{u.name}{u.designation&&<span style={{fontSize:11,color:G.mut,fontWeight:400}}> — {u.designation}</span>}</div>
-              <div style={{fontSize:11,color:G.dim,marginTop:1}}>{u.email}</div>
-              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).length} office(s)</div>
-              {mgr&&<div style={{fontSize:11,color:G.mut}}>Reports to: <span style={{color:G.gold}}>{mgr.name}</span></div>}
-              <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
-                <Chip bg={roleColor[u.role]||G.dim} label={ROLE_LABELS[u.role]||u.role} sm/>
-                <Chip bg={u.employeeType==="articled"?G.pu:G.bl} label={u.employeeType==="articled"?"Articled":"Employee"} sm/>
-                {u.weeklyOff&&<Chip bg={G.card2} label={WEEKLY_OFF_OPTIONS.find(o=>o.value===u.weeklyOff)?.label||u.weeklyOff} sm/>}
-              </div>
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
-              <button onClick={()=>startEdit(u)} style={{...B(G.bl),fontSize:11,padding:"6px 10px"}}>✏️ Edit</button>
-              <button onClick={()=>{
-                const np=prompt(`Reset password for ${u.name}:`);
-                if(!np)return;
-                if(np.length<6)return ST("Password must be at least 6 characters","error");
-                P({...D,users:D.users.map(x=>x.id===u.id?{...x,password:np,firstLogin:true}:x)});
-                ST(`✅ Password reset for ${u.name}. They will be asked to change on next login.`);
-              }} style={{...B(G.am),fontSize:11,padding:"6px 10px"}}>🔑 Reset</button>
-              <button onClick={()=>{if(!confirm(`Remove ${u.name}?`))return;P({...D,users:D.users.filter(x=>x.id!==u.id)});ST("Removed!");}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"6px 10px"}}>✕</button>
-            </div>
-          </div>
-        );
-      })}
+      ))}
     </>
   );
 }
 
 function TC({D,P,ST}) {
-  const [sa,setSa]=useState(false);
-  const [editT,setEditT]=useState(null);
-  const emptyTF={name:"",shiftStart:"09:30",shiftEnd:"18:30"};
-  const [f,setF]=useState(emptyTF);
-  const saveTeam=()=>{
-    if(!f.name)return ST("Name required","error");
-    if(editT){P({...D,teams:D.teams.map(t=>t.id===editT?{...t,...f}:t)});ST("✅ Updated!");}
-    else{P({...D,teams:[...D.teams,{...f,id:gid()}]});ST("✅ Created!");}
-    setSa(false);setEditT(null);setF(emptyTF);
-  };
-  const startEditT=(t)=>{setF({name:t.name,shiftStart:t.shiftStart,shiftEnd:t.shiftEnd});setEditT(t.id);setSa(true);}
+  const [sa,setSa]=useState(false),[f,setF]=useState({name:"",shiftStart:"09:30",shiftEnd:"18:30"});
   return (
     <>
       <button onClick={()=>setSa(!sa)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Team"}</button>
@@ -1594,251 +916,188 @@ function TC({D,P,ST}) {
       {D.teams.map(t=>(
         <div key={t.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:G.mut}}>🕘 {t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members</div></div>
-          <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>startEditT(t)} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
-          <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,teams:D.teams.filter(x=>x.id!==t.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
-        </div>
+          <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,teams:D.teams.filter(x=>x.id!==t.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>✕</button>
         </div>
       ))}
     </>
   );
 }
 
-
-function ORG({D,vu}) {
-  const renderUser=(u,depth=0)=>{
-    const reports=vu.filter(x=>x.reportingTo===u.id);
-    const team=D.teams.find(t=>t.id===u.teamId);
-    const roleColors={admin:G.rd,hr:G.pu,hod:G.bl,manager:G.navyL,staff:G.card2};
-    return (
-      <div key={u.id} style={{marginLeft:depth*20,marginBottom:8}}>
-        <div style={{background:G.card,border:`1px solid ${roleColors[u.role]||G.bdr}`,borderRadius:12,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:34,height:34,borderRadius:"50%",background:roleColors[u.role]||G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>
-            {u.role==="admin"?"👑":u.role==="hr"?"🧑‍💼":u.role==="hod"?"🏛":u.role==="manager"?"👔":"👤"}
-          </div>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:13}}>{u.name}</div>
-            <div style={{fontSize:11,color:G.mut}}>{ROLE_LABELS[u.role]||u.role}{u.designation?` — ${u.designation}`:""}</div>
-            {team&&<div style={{fontSize:10,color:G.dim}}>{team.name}</div>}
-          </div>
-          <Chip bg={roleColors[u.role]||G.dim} label={ROLE_LABELS[u.role]||u.role} sm/>
-        </div>
-        {reports.length>0&&(
-          <div style={{marginLeft:10,marginTop:4,paddingLeft:10,borderLeft:`2px solid ${G.bdr}`}}>
-            {reports.map(r=>renderUser(r,0))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // Find top-level users (no reporting manager or reporting to admin)
-  const topLevel=vu.filter(u=>!u.reportingTo||u.reportingTo===""||u.role==="admin"||u.role==="hr"||u.role==="hod");
-  const admins=D.users.filter(u=>u.role==="admin");
-
-  return (
-    <div style={{maxWidth:500}}>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}>
-        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>🏛 Organisation Hierarchy</div>
-        <div style={{color:G.dim,fontSize:12,marginTop:3}}>Reporting structure of your organisation.</div>
-      </div>
-      {admins.map(u=>renderUser(u,0))}
-      {topLevel.filter(u=>u.role!=="admin").map(u=>renderUser(u,0))}
-    </div>
-  );
-}
 function RST({D,P,ST,logout}) {
   const [pwd,setPwd]=useState("");
   const [confirm,setConfirm]=useState("");
-  const [step,setStep]=useState("menu");
+  const [step,setStep]=useState("menu"); // menu | pwd_data | pwd_full | pwd_users | done
   const ADMIN_PWD="Nucleus123#";
 
   const verify=(next)=>{
     if(pwd!==ADMIN_PWD)return ST("Incorrect admin password","error");
     setStep(next);setPwd("");
   };
+
+  // Level 1: Reset all transactional data only (attendance, leaves, regs, locations)
   const resetData=()=>{
-    if(confirm!=="RESET DATA")return ST('Type RESET DATA to confirm',"error");
+    if(confirm!=="RESET DATA")return ST('Type "RESET DATA" to confirm',"error");
     P({...D,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[]});
-    setStep("done");setConfirm("");ST("✅ Data cleared!");
-  };
-  const resetFull=()=>{
-    if(confirm!=="FACTORY RESET")return ST('Type FACTORY RESET to confirm',"error");
-    P({...INIT_CONFIG,...EMPTY_STATE,loading:false});
-    setStep("done");setConfirm("");ST("✅ Factory reset complete!");
-  };
-  const resetUsers=()=>{
-    if(confirm!=="RESET USERS")return ST('Type RESET USERS to confirm',"error");
-    const adminOnly=D.users.filter(u=>u.role==="admin");
-    P({...D,users:adminOnly,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[]});
-    setStep("done");setConfirm("");ST("✅ Staff removed!");
+    setStep("done");setConfirm("");
+    ST("✅ All data cleared. Users and settings kept.");
   };
 
+  // Level 2: Full factory reset — wipe everything back to blank
+  const resetFull=()=>{
+    if(confirm!=="FACTORY RESET")return ST('Type "FACTORY RESET" to confirm',"error");
+    const blank={
+      companyName:"Nucleus HRMS",
+      offices:[],teams:[],
+      users:[{id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",teamId:null,officeIds:[],customShift:null,managedTeams:[]}],
+      attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[],
+      leavePolicy:DP,
+      holidays:[{id:"h1",date:"2026-01-26",name:"Republic Day"},{id:"h2",date:"2026-08-15",name:"Independence Day"},{id:"h3",date:"2026-10-02",name:"Gandhi Jayanti"},{id:"h4",date:"2026-11-08",name:"Diwali"},{id:"h5",date:"2026-12-25",name:"Christmas"}],
+    };
+    P(blank);setStep("done");setConfirm("");
+    ST("✅ Factory reset complete. All data and users wiped.");
+  };
+
+  // Level 3: Reset only staff users (keep admin, offices, teams, settings)
+  const resetUsers=()=>{
+    if(confirm!=="RESET USERS")return ST('Type "RESET USERS" to confirm',"error");
+    const adminOnly=D.users.filter(u=>u.role==="admin");
+    P({...D,users:adminOnly,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[]});
+    setStep("done");setConfirm("");
+    ST("✅ All staff removed. Admin account kept.");
+  };
+
+  const statusColors={menu:G.navy,done:G.gr};
   if(step==="done") return (
     <div style={{maxWidth:440,margin:"0 auto"}}>
       <div style={{...K,background:"#0d2010",border:`1px solid ${G.gr}`,textAlign:"center",padding:32}}>
         <div style={{fontSize:48,marginBottom:12}}>✅</div>
         <div style={{fontWeight:800,fontSize:18,color:G.gr,marginBottom:8}}>Reset Complete</div>
-        <div style={{fontSize:13,color:G.mut,marginBottom:20}}>Selected data has been permanently deleted.</div>
+        <div style={{fontSize:13,color:G.mut,marginBottom:20}}>The selected data has been permanently deleted.</div>
         <button onClick={()=>{setStep("menu");logout();}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Logout & Restart Fresh</button>
       </div>
     </div>
   );
 
-  if(step==="menu") return (
-    <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,background:"#1a0a00",border:`1px solid ${G.rd}`,marginBottom:16}}>
-        <div style={{color:G.rd,fontWeight:800,fontSize:14,marginBottom:4}}>⚠️ Danger Zone</div>
-        <div style={{fontSize:12,color:G.mut}}>All reset actions are permanent and cannot be undone.</div>
-      </div>
-      <div style={K}>
-        <div style={{fontWeight:800,fontSize:14,color:G.am,marginBottom:6}}>🗑 Level 1 — Reset All Data</div>
-        <div style={{fontSize:12,color:G.mut,marginBottom:4}}>Deletes attendance, leaves, locations. Keeps users and settings.</div>
-        <button onClick={()=>setStep("pwd_data")} style={{...B(G.am),width:"100%",fontSize:13}}>Proceed →</button>
-      </div>
-      <div style={K}>
-        <div style={{fontWeight:800,fontSize:14,color:G.rd,marginBottom:6}}>🔄 Level 2 — Factory Reset</div>
-        <div style={{fontSize:12,color:G.mut,marginBottom:4}}>Wipes everything. Only admin account kept.</div>
-        <button onClick={()=>setStep("pwd_full")} style={{...B(G.rd),width:"100%",fontSize:13}}>Proceed →</button>
-      </div>
-      <div style={K}>
-        <div style={{fontWeight:800,fontSize:14,color:G.pu,marginBottom:6}}>👥 Level 3 — Reset Staff & Data</div>
-        <div style={{fontSize:12,color:G.mut,marginBottom:4}}>Removes all staff and data. Offices and teams stay.</div>
-        <button onClick={()=>setStep("pwd_users")} style={{...B(G.pu),width:"100%",fontSize:13}}>Proceed →</button>
-      </div>
-    </div>
-  );
-
-  if(step==="pwd_data"||step==="pwd_full"||step==="pwd_users") return (
-    <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={K}>
-        <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
-        <div style={{fontWeight:800,color:step==="pwd_full"?G.rd:step==="pwd_users"?G.pu:G.am,fontSize:15,marginBottom:12}}>Enter Admin Password</div>
-        <FRow label="Admin Password"><input type="password" style={I} value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Enter password"/></FRow>
-        <button onClick={()=>verify(step==="pwd_data"?"confirm_data":step==="pwd_full"?"confirm_full":"confirm_users")} style={{...B(step==="pwd_full"?G.rd:step==="pwd_users"?G.pu:G.am),width:"100%",fontWeight:700}}>Verify →</button>
-      </div>
-    </div>
-  );
-
-  if(step==="confirm_data") return (
-    <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,border:`1px solid ${G.am}`}}>
-        <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
-        <div style={{fontWeight:800,color:G.am,fontSize:15,marginBottom:12}}>Type RESET DATA to confirm</div>
-        <FRow label="Confirmation"><input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET DATA"/></FRow>
-        <button onClick={resetData} style={{...B(G.am),width:"100%",fontWeight:800}}>Confirm Reset</button>
-      </div>
-    </div>
-  );
-
-  if(step==="confirm_full") return (
-    <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,border:`1px solid ${G.rd}`}}>
-        <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
-        <div style={{fontWeight:800,color:G.rd,fontSize:15,marginBottom:12}}>Type FACTORY RESET to confirm</div>
-        <FRow label="Confirmation"><input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="FACTORY RESET"/></FRow>
-        <button onClick={resetFull} style={{...B(G.rd),width:"100%",fontWeight:800}}>Confirm Factory Reset</button>
-      </div>
-    </div>
-  );
-
   return (
     <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,border:`1px solid ${G.pu}`}}>
-        <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
-        <div style={{fontWeight:800,color:G.pu,fontSize:15,marginBottom:12}}>Type RESET USERS to confirm</div>
-        <FRow label="Confirmation"><input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET USERS"/></FRow>
-        <button onClick={resetUsers} style={{...B(G.pu),width:"100%",fontWeight:800}}>Confirm Reset Staff</button>
+      {/* Warning banner */}
+      <div style={{...K,background:"#1a0a00",border:`1px solid ${G.rd}`,marginBottom:16}}>
+        <div style={{color:G.rd,fontWeight:800,fontSize:14,marginBottom:4}}>⚠️ Danger Zone</div>
+        <div style={{fontSize:12,color:G.mut}}>All reset actions are permanent and cannot be undone. Make sure you have exported any data you need before proceeding.</div>
       </div>
+
+      {step==="menu" && (<>
+        {/* Option 1 */}
+        <div style={K}>
+          <div style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:12}}>
+            <div style={{width:40,height:40,borderRadius:10,background:"#1a1000",border:`1px solid ${G.am}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🗑</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:14,color:G.am}}>Level 1 — Reset All Data</div>
+              <div style={{fontSize:12,color:G.mut,marginTop:3}}>Deletes all attendance records, leaves, regularizations and live locations.</div>
+              <div style={{fontSize:11,color:G.dim,marginTop:2}}>✓ Keeps: Users, offices, teams, policies, holidays</div>
+            </div>
+          </div>
+          <button onClick={()=>setStep("pwd_data")} style={{...B(G.am),width:"100%",fontSize:13}}>Proceed to Reset Data →</button>
+        </div>
+
+        {/* Option 2 */}
+        <div style={K}>
+          <div style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:12}}>
+            <div style={{width:40,height:40,borderRadius:10,background:"#1a0a00",border:`1px solid ${G.rd}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>🔄</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:14,color:G.rd}}>Level 2 — Full Factory Reset</div>
+              <div style={{fontSize:12,color:G.mut,marginTop:3}}>Wipes everything — all users, data, settings. App goes back to day one.</div>
+              <div style={{fontSize:11,color:G.dim,marginTop:2}}>✓ Keeps: Only admin account (ag@nucleusadvisors.in)</div>
+            </div>
+          </div>
+          <button onClick={()=>setStep("pwd_full")} style={{...B(G.rd),width:"100%",fontSize:13}}>Proceed to Factory Reset →</button>
+        </div>
+
+        {/* Option 3 */}
+        <div style={K}>
+          <div style={{display:"flex",gap:12,alignItems:"flex-start",marginBottom:12}}>
+            <div style={{width:40,height:40,borderRadius:10,background:"#0a001a",border:`1px solid ${G.pu}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>👥</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:14,color:G.pu}}>Level 3 — Reset Staff & Data</div>
+              <div style={{fontSize:12,color:G.mut,marginTop:3}}>Removes all staff/managers and clears all data. Offices, teams and settings stay.</div>
+              <div style={{fontSize:11,color:G.dim,marginTop:2}}>✓ Keeps: Offices, teams, policies, holidays, admin</div>
+            </div>
+          </div>
+          <button onClick={()=>setStep("pwd_users")} style={{...B(G.pu),width:"100%",fontSize:13}}>Proceed to Reset Staff →</button>
+        </div>
+      </>)}
+
+      {/* Password + Confirm step */}
+      {(step==="pwd_data"||step==="pwd_full"||step==="pwd_users")&&(
+        <div style={K}>
+          <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
+          <div style={{fontWeight:800,color:step==="pwd_full"?G.rd:step==="pwd_users"?G.pu:G.am,fontSize:15,marginBottom:4}}>
+            {step==="pwd_data"?"🗑 Reset All Data":step==="pwd_full"?"🔄 Factory Reset":"👥 Reset Staff & Data"}
+          </div>
+          <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Enter your admin password to continue.</div>
+          <FRow label="Admin Password">
+            <input type="password" style={I} value={pwd} onChange={e=>setPwd(e.target.value)} placeholder="Enter admin password"/>
+          </FRow>
+          <button onClick={()=>verify(step==="pwd_data"?"confirm_data":step==="pwd_full"?"confirm_full":"confirm_users")} style={{...B(step==="pwd_full"?G.rd:step==="pwd_users"?G.pu:G.am),width:"100%",fontWeight:700}}>Verify Password →</button>
+        </div>
+      )}
+
+      {step==="confirm_data"&&(
+        <div style={{...K,border:`1px solid ${G.am}`}}>
+          <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
+          <div style={{fontWeight:800,color:G.am,fontSize:15,marginBottom:4}}>🗑 Final Confirmation</div>
+          <div style={{fontSize:12,color:G.mut,marginBottom:16}}>This will permanently delete all attendance, leaves and location data. Type <span style={{color:G.am,fontWeight:700}}>RESET DATA</span> to confirm.</div>
+          <FRow label="Type RESET DATA to confirm">
+            <input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET DATA"/>
+          </FRow>
+          <button onClick={resetData} style={{...B(G.am),width:"100%",fontWeight:800}}>Confirm Reset Data</button>
+        </div>
+      )}
+
+      {step==="confirm_full"&&(
+        <div style={{...K,border:`1px solid ${G.rd}`}}>
+          <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
+          <div style={{fontWeight:800,color:G.rd,fontSize:15,marginBottom:4}}>🔄 Final Confirmation — Factory Reset</div>
+          <div style={{fontSize:12,color:G.mut,marginBottom:16}}>This will permanently wipe EVERYTHING. Type <span style={{color:G.rd,fontWeight:700}}>FACTORY RESET</span> to confirm.</div>
+          <FRow label="Type FACTORY RESET to confirm">
+            <input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="FACTORY RESET"/>
+          </FRow>
+          <button onClick={resetFull} style={{...B(G.rd),width:"100%",fontWeight:800}}>Confirm Factory Reset</button>
+        </div>
+      )}
+
+      {step==="confirm_users"&&(
+        <div style={{...K,border:`1px solid ${G.pu}`}}>
+          <button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:14}}>← Back</button>
+          <div style={{fontWeight:800,color:G.pu,fontSize:15,marginBottom:4}}>👥 Final Confirmation</div>
+          <div style={{fontSize:12,color:G.mut,marginBottom:16}}>This will remove all staff and their data. Type <span style={{color:G.pu,fontWeight:700}}>RESET USERS</span> to confirm.</div>
+          <FRow label="Type RESET USERS to confirm">
+            <input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET USERS"/>
+          </FRow>
+          <button onClick={resetUsers} style={{...B(G.pu),width:"100%",fontWeight:800}}>Confirm Reset Staff</button>
+        </div>
+      )}
     </div>
   );
 }
 
 function OC({D,P,ST}) {
-  const [sa,setSa]=useState(false);
-  const [editO,setEditO]=useState(null);
-  const emptyOF={name:"",lat:"",lng:"",radius:50};
-  const [f,setF]=useState(emptyOF);
-  const [dt,setDt]=useState(false);
-  const [search,setSearch]=useState("");
-  const [searching,setSearching]=useState(false);
-
-  const det=()=>{
-    setDt(true);
-    navigator.geolocation?.getCurrentPosition(p=>{
-      setF(prev=>({...prev,lat:p.coords.latitude.toFixed(6),lng:p.coords.longitude.toFixed(6)}));
-      setDt(false);
-    },()=>{ST("Cannot detect location","error");setDt(false);},{enableHighAccuracy:true,timeout:10000});
-  };
-
-  const searchLocation=async()=>{
-    if(!search.trim())return ST("Enter a location to search","error");
-    setSearching(true);
-    try{
-      const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(search)}&limit=1`);
-      const data=await res.json();
-      if(data&&data[0]){
-        setF(prev=>({...prev,lat:parseFloat(data[0].lat).toFixed(6),lng:parseFloat(data[0].lon).toFixed(6)}));
-        ST("📍 Location found!");
-      } else {
-        ST("Location not found. Try a different search.","error");
-      }
-    } catch(e){ST("Search failed. Try using GPS instead.","error");}
-    setSearching(false);
-  };
-
-  const saveOffice=()=>{
-    if(!f.name||!f.lat||!f.lng)return ST("Name and location required","error");
-    const rec={...f,lat:parseFloat(f.lat),lng:parseFloat(f.lng),radius:parseInt(f.radius)};
-    if(editO){P({...D,offices:D.offices.map(o=>o.id===editO?{...o,...rec}:o)});ST("✅ Updated!");}
-    else{P({...D,offices:[...D.offices,{...rec,id:gid()}]});ST("✅ Added!");}
-    setSa(false);setEditO(null);setF(emptyOF);setSearch("");
-  };
-
-  const startEditO=(o)=>{setF({name:o.name,lat:String(o.lat),lng:String(o.lng),radius:o.radius});setEditO(o.id);setSa(true);}
+  const [sa,setSa]=useState(false),[f,setF]=useState({name:"",lat:"",lng:"",radius:50}),[dt,setDt]=useState(false);
+  const det=()=>{setDt(true);navigator.geolocation?.getCurrentPosition(p=>{setF({...f,lat:p.coords.latitude.toFixed(6),lng:p.coords.longitude.toFixed(6)});setDt(false);},()=>{ST("Cannot detect","error");setDt(false);});};
   return (
     <>
       <button onClick={()=>setSa(!sa)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Office"}</button>
-      {sa&&(
-        <div style={{...K,marginBottom:10}}>
-          <div style={{fontWeight:800,color:G.gold,marginBottom:10}}>{editO?"✏️ Edit Office":"🏢 New Office"}</div>
-          <FRow label="Office Name">
-            <input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Delhi Office"/>
-          </FRow>
-          <FRow label="Search Location by Name">
-            <div style={{display:"flex",gap:8}}>
-              <input style={{...I,flex:1}} value={search} onChange={e=>setSearch(e.target.value)} placeholder="e.g. Connaught Place Delhi" onKeyDown={e=>e.key==="Enter"&&searchLocation()}/>
-              <button onClick={searchLocation} style={{...B(G.bl),padding:"11px 16px",flexShrink:0,borderRadius:10}}>{searching?"⏳":"🔍"}</button>
-            </div>
-          </FRow>
-          <button onClick={det} style={{...B(G.pu),width:"100%",marginBottom:10,borderRadius:10}}>{dt?"Detecting location…":"📍 Use My Current Location"}</button>
-          {(f.lat||f.lng)&&(
-            <div style={{background:G.navy,borderRadius:10,padding:"8px 12px",marginBottom:10,fontSize:12,color:G.gold}}>
-              📍 {f.lat}, {f.lng}
-              {f.lat&&f.lng&&<a href={`https://maps.google.com/?q=${f.lat},${f.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl,marginLeft:8,textDecoration:"none"}}>View on Map ↗</a>}
-            </div>
-          )}
-          <div style={{display:"flex",gap:8}}>
-            <FRow label="Latitude"><input style={I} value={f.lat} onChange={e=>setF({...f,lat:e.target.value})} placeholder="28.6139"/></FRow>
-            <FRow label="Longitude"><input style={I} value={f.lng} onChange={e=>setF({...f,lng:e.target.value})} placeholder="77.2090"/></FRow>
-          </div>
-          <FRow label="Geofence Radius (meters)">
-            <input type="number" style={I} value={f.radius} onChange={e=>setF({...f,radius:e.target.value})} placeholder="50"/>
-          </FRow>
-          <div style={{fontSize:11,color:G.dim,marginBottom:10}}>Staff must be within this radius to check in at this office.</div>
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={saveOffice} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editO?"💾 Save Changes":"✅ Add Office"}</button>
-            <button onClick={()=>{setSa(false);setEditO(null);setF(emptyOF);setSearch("");}} style={{...B(G.dim),flex:1}}>Cancel</button>
-          </div>
-        </div>
-      )}
+      {sa&&(<div style={{...K,marginBottom:10}}>
+        <FRow label="Name"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="Delhi Office"/></FRow>
+        <button onClick={det} style={{...B(G.pu),width:"100%",marginBottom:10}}>{dt?"Detecting…":"📍 Use My Location"}</button>
+        <div style={{display:"flex",gap:8}}><FRow label="Latitude"><input style={I} value={f.lat} onChange={e=>setF({...f,lat:e.target.value})}/></FRow><FRow label="Longitude"><input style={I} value={f.lng} onChange={e=>setF({...f,lng:e.target.value})}/></FRow></div>
+        <FRow label="Radius (m)"><input type="number" style={I} value={f.radius} onChange={e=>setF({...f,radius:e.target.value})}/></FRow>
+        <button onClick={()=>{if(!f.name||!f.lat||!f.lng)return ST("Name and location required","error");P({...D,offices:[...D.offices,{...f,id:gid(),lat:parseFloat(f.lat),lng:parseFloat(f.lng),radius:parseInt(f.radius)}]});ST("Added!");setSa(false);}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Add Office</button>
+      </div>)}
       {D.offices.map(o=>(
         <div key={o.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m</div></div>
-          <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>startEditO(o)} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
-            <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,offices:D.offices.filter(x=>x.id!==o.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
-          </div>
+          <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,offices:D.offices.filter(x=>x.id!==o.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>✕</button>
         </div>
       ))}
     </>
