@@ -151,13 +151,36 @@ const INIT_CONFIG={
   ],
 };
 // Runtime state (never stored in Firebase)
-const EMPTY_STATE={attendance:[],leaves:[],liveLocations:{},notifications:[],regularizations:[],loading:true};
+const EMPTY_STATE={attendance:[],leaves:[],liveLocations:{},notifications:[],regularizations:[],loading:false};
 
-const G={bg:"#0a0f1e",card:"#111827",card2:"#1a2235",bdr:"#1e3a5f",gold:"#c9a84c",goldL:"#e8c97a",goldD:"#a07830",navy:"#0d1f3c",navyL:"#1a3a6b",txt:"#e8dcc8",mut:"#8a9bb5",dim:"#4a5a72",gr:"#10b981",rd:"#ef4444",am:"#f59e0b",bl:"#3b82f6",pu:"#8b5cf6"};
-const B=(bg,x={})=>({background:bg,color:"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
-const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:G.navy,color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
-const L={fontSize:11,color:G.mut,marginBottom:4,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
-const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12};
+// Nucleus Advisors brand theme — navy + red + white
+const G={
+  bg:"#f0f4f8",        // Light grey background
+  card:"#ffffff",      // White cards
+  card2:"#f8fafc",     // Slightly off-white
+  bdr:"#dce4ef",       // Light border
+  navy:"#1a2a5e",      // Primary navy (brand)
+  navyL:"#2a3f8f",     // Lighter navy
+  navyD:"#0f1a3c",     // Darker navy
+  navyBg:"#eef1f9",    // Navy tint background
+  red:"#cc2222",       // Brand red (arrow in logo)
+  redL:"#e53333",      // Lighter red
+  txt:"#1a2a5e",       // Navy text
+  mut:"#4a5a80",       // Muted navy
+  dim:"#8a9bb5",       // Dimmed
+  gr:"#16a34a",        // Green
+  rd:"#dc2626",        // Error red
+  am:"#d97706",        // Amber
+  bl:"#2563eb",        // Blue
+  pu:"#7c3aed",        // Purple
+  gold:"#1a2a5e",      // Use navy as "gold" (primary accent)
+  goldL:"#2a3f8f",
+  goldD:"#0f1a3c",
+};
+const B=(bg,x={})=>({background:bg,color:bg==="#ffffff"||bg==="#f8fafc"||bg==="#fff"?"#1a2a5e":"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
+const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:"#fff",color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
+const L={fontSize:11,color:G.mut,marginBottom:5,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
+const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12,boxShadow:"0 1px 4px rgba(26,42,94,0.06)"};
 
 const Chip=({bg,label,sm})=>(
   <span style={{background:bg,color:"#fff",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
@@ -166,82 +189,33 @@ const FRow=({label,children})=>(
   <div style={{marginBottom:12}}><label style={L}>{label}</label>{children}</div>
 );
 
-const Logo=({s=32})=>(
-  <svg width={s} height={s} viewBox="0 0 40 40" fill="none">
-    <circle cx="20" cy="20" r="18" stroke={G.gold} strokeWidth="2.5" fill="none"/>
-    <circle cx="20" cy="20" r="6" fill={G.gold}/>
-    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(45 20 20)"/>
-    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(-45 20 20)"/>
-  </svg>
-);
-const Msg=({t})=>(
-  <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:t.type==="error"?G.rd:G.gr,color:"#fff",padding:"12px 24px",borderRadius:12,fontWeight:700,fontSize:14,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",whiteSpace:"nowrap",border:`1px solid ${G.gold}`}}>
-    {t.msg}
+
+const Logo=({s=40,h})=>(
+  <div style={{display:"flex",alignItems:"center",gap:6}}>
+    <svg width={h||s} height={h||s} viewBox="0 0 40 20" fill="none">
+      <text x="0" y="16" fontFamily="Arial Black,sans-serif" fontSize="14" fontWeight="900" fill="#1B2F5E">N</text>
+      <line x1="11" y1="18" x2="11" y2="2" stroke="#cc2222" strokeWidth="3" strokeLinecap="round"/>
+      <polygon points="11,0 7,8 15,8" fill="#cc2222"/>
+      <text x="14" y="16" fontFamily="Arial Black,sans-serif" fontSize="14" fontWeight="900" fill="#1B2F5E">ucleus</text>
+    </svg>
+    <span style={{fontSize:9,fontWeight:800,color:"#1B2F5E",letterSpacing:"0.15em",textTransform:"uppercase",display:"block",marginTop:2}}>ADVISORS</span>
   </div>
 );
 
-function Cam({onDone,onCancel}) {
-  const vr=useRef(),cr=useRef(),sr=useRef();
-  const [ok,setOk]=useState(false);
-  const [err,setErr]=useState(null);
-  useEffect(()=>{
-    navigator.mediaDevices?.getUserMedia({video:{facingMode:"user"}})
-      .then(s=>{sr.current=s;if(vr.current){vr.current.srcObject=s;setOk(true);}})
-      .catch(()=>setErr("Camera denied. Please allow access."));
-    return()=>sr.current?.getTracks().forEach(t=>t.stop());
-  },[]);
-  const snap=()=>{
-    const v=vr.current,c=cr.current;if(!v||!c)return;
-    c.width=v.videoWidth;c.height=v.videoHeight;c.getContext("2d").drawImage(v,0,0);
-    sr.current?.getTracks().forEach(t=>t.stop());
-    onDone(c.toDataURL("image/jpeg",0.7));
-  };
-  if(err) return (
-    <div style={{textAlign:"center",padding:20,color:G.rd}}>
-      <div style={{fontSize:36}}>📷</div>
-      <p style={{fontSize:13}}>{err}</p>
-      <button onClick={onCancel} style={B(G.dim)}>Back</button>
-    </div>
-  );
-  return (
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
-      <div style={{borderRadius:14,overflow:"hidden",width:"100%",maxWidth:300,background:"#000",border:`2px solid ${G.gold}`,position:"relative"}}>
-        <video ref={vr} autoPlay playsInline muted style={{width:"100%",display:"block"}}/>
-        {!ok&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",color:G.gold}}>Loading…</div>}
-      </div>
-      <canvas ref={cr} style={{display:"none"}}/>
-      <div style={{display:"flex",gap:10,width:"100%"}}>
-        <button onClick={onCancel} style={{...B(G.dim),flex:1}}>Cancel</button>
-        <button onClick={snap} disabled={!ok} style={{...B(ok?G.gold:"#555"),flex:2,color:ok?"#000":"#fff"}}>📸 Take Selfie</button>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [D,setD]=useState({...INIT_CONFIG,...EMPTY_STATE});
+
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
 
   // ── Load config from Firebase on mount ──
   useEffect(()=>{
-    // First check if config exists in Firestore
-    getConfig().then(cfg=>{
+    const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
-        // Config exists — use it
         setD(prev=>({...prev,...cfg,loading:false}));
       } else {
-        // First run — write initial config to Firestore (admin only)
-        setConfig(INIT_CONFIG).then(()=>{
-          setD(prev=>({...prev,...INIT_CONFIG,loading:false}));
-        });
-      }
-    });
-    // Then listen for real-time updates
-    const unsub=onConfig(cfg=>{
-      if(cfg&&cfg.users){
-        setD(prev=>({...prev,...cfg,loading:false}));
+        setConfig(INIT_CONFIG).catch(()=>{});
       }
     });
     return unsub;
@@ -369,21 +343,19 @@ export default function App() {
     if(!u)return ST("Invalid credentials","error");
     setCu(u);sv("nau5",u);
   };
-  const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
+  const logout=()=>{
+    setCu(null);
+    sv("nau5",null);
+    setSc("login");
+    // Don't reset D — keeps config loaded so login screen works instantly
+  };
   const unread=(D.notifications||[]).filter(n=>n.userId===cu?.id&&!n.read).length;
 
-  if(D.loading) return (
-    <div style={{minHeight:"100vh",background:"#0a0f1e",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
-      <Logo s={60}/>
-      <div style={{color:"#c9a84c",fontSize:13,fontWeight:600,letterSpacing:"0.1em"}}>Loading Nucleus HRMS…</div>
-      <div style={{width:36,height:36,border:"4px solid #c9a84c",borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
-    </div>
-  );
 
   const props={user:cu,D,P,ST,AN,logout,setSc,unread};
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}body{background:#f0f4f8}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#dce4ef;border-radius:3px}input::placeholder,textarea::placeholder{color:#8a9bb5}select option{background:#fff;color:#1a2a5e}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
       {sc==="login"&&<Login login={login} name={D.companyName} D={D} P={P} ST={ST} logout={logout}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
@@ -404,16 +376,19 @@ function Login({login,name}) {
   const [e,setE]=useState("");
   const [p,setP]=useState("");
   return (
-    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${G.bg},${G.navy})`}}>
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:"linear-gradient(135deg,#eef1f9,#f8fafc)"}}>
       <div style={{width:"100%",maxWidth:400}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:10}}><Logo s={48}/><div style={{textAlign:"left"}}><div style={{fontSize:22,fontWeight:900,color:G.gold}}>Nucleus Advisors</div><div style={{fontSize:11,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.1em"}}>HR Management System</div></div></div>
-          <div style={{width:80,height:2,background:`linear-gradient(90deg,transparent,${G.gold},transparent)`,margin:"0 auto"}}/>
+          <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
+            <Logo s={40} full={true}/>
+          </div>
+          <div style={{fontSize:12,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.12em"}}>HR Management System</div>
+          <div style={{width:60,height:3,background:"#cc2222",margin:"10px auto 0",borderRadius:2}}/>
         </div>
-        <div style={{...K,padding:24,marginBottom:12}}>
+        <div style={{background:"#fff",borderRadius:20,padding:24,marginBottom:12,boxShadow:"0 4px 24px rgba(26,47,90,0.12)",border:`1px solid ${G.bdr}`}}>
           <FRow label="Email"><input style={I} type="email" value={e} onChange={x=>setE(x.target.value)} placeholder="you@nucleusadvisors.in"/></FRow>
           <FRow label="Password"><input style={I} type="password" value={p} onChange={x=>setP(x.target.value)} placeholder="••••••••" onKeyDown={x=>x.key==="Enter"&&login(e,p)}/></FRow>
-          <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:"#000",fontWeight:800}}>Sign In →</button>
+          <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.navy},${G.navyL})`),width:"100%",fontSize:15,padding:14,color:"#fff",fontWeight:800,borderRadius:12}}>Sign In →</button>
           <div style={{textAlign:"center",marginTop:10}}>
             <span onClick={()=>setShowForgot(true)} style={{fontSize:12,color:G.bl,cursor:"pointer",textDecoration:"underline"}}>Forgot Password?</span>
           </div>
@@ -425,7 +400,7 @@ function Login({login,name}) {
           </div>
         )}
         <div style={{textAlign:"center",marginTop:8}}>
-          <div style={{fontSize:11,color:G.dim}}>Developed by <span style={{color:G.mut,fontWeight:700}}>Ashish Gupta</span></div>
+          <div style={{fontSize:11,color:G.mut}}>Developed by <span style={{color:G.navy,fontWeight:700}}>Ashish Gupta</span></div>
           <div style={{fontSize:10,color:G.dim,marginTop:4}}>© {new Date().getFullYear()} Nucleus Advisors. All rights reserved.</div>
         </div>
         <div style={{textAlign:"center",marginTop:24,padding:"12px 0"}}>
@@ -532,11 +507,17 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   };
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}><Logo s={28}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>Nucleus Advisors</div><div style={{fontSize:16,fontWeight:800}}>{user.name}</div></div></div>
+      <div style={{background:"#1a2a5e",margin:"-20px -20px 18px",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <Logo s={28} full={false}/>
+          <div>
+            <div style={{fontSize:10,color:"#cc2222",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>Nucleus HRMS</div>
+            <div style={{fontSize:15,fontWeight:800,color:"#fff"}}>{user.name}</div>
+          </div>
+        </div>
         <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setSc("notif")} style={{...B(G.card),padding:"8px 11px",border:`1px solid ${G.bdr}`,fontSize:13,position:"relative"}}>{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:15,height:15,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{unread}</span>}🔔</button>
-          <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Out</button>
+          <button onClick={()=>setSc("notif")} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,padding:"8px 11px",fontSize:13,cursor:"pointer",position:"relative",color:"#fff"}}>{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:15,height:15,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{unread}</span>}🔔</button>
+          <button onClick={logout} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:12,padding:"8px 12px",cursor:"pointer",color:"#fff",fontWeight:600}}>Logout</button>
         </div>
       </div>
       {(hol||isWE(tod()))&&(
@@ -545,8 +526,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           <div><div style={{color:G.gold,fontWeight:800,fontSize:14}}>{hol||"Weekend"}</div><div style={{color:G.mut,fontSize:12}}>No attendance needed</div></div>
         </div>
       )}
-      <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
-        <div style={{fontSize:40,fontWeight:900,color:G.gold}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
+      <div style={{background:"linear-gradient(135deg,#1a2a5e,#2a3f8f)",borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
+        <div style={{fontSize:40,fontWeight:900,color:"#fff"}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
         <div style={{color:G.mut,fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
         {sh&&<div style={{marginTop:8,background:"rgba(201,168,76,.15)",border:`1px solid ${G.gold}44`,borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:G.gold}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
@@ -604,7 +585,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           ...(rec&&rec.lateBy>0&&!rec.checkOut?[["Request Late Approval","lateapproval"]]:[]),
           ["Change Password","changepwd"],
         ].map(([lb,s])=>(
-          <button key={s} onClick={()=>setSc(s)} style={{...B(s==="lateapproval"?G.am:G.card),border:`1px solid ${s==="lateapproval"?G.am:G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
+          <button key={s} onClick={()=>setSc(s)} style={{background:s==="lateapproval"?"#d97706":"#fff",color:s==="lateapproval"?"#fff":"#1a2a5e",border:s==="lateapproval"?"none":"1px solid #dce4ef",borderRadius:12,fontSize:12,padding:10,fontWeight:600,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 1px 3px rgba(26,42,94,0.08)"}}>{lb}</button>
         ))}
       </div>
     </div>
@@ -1042,12 +1023,18 @@ function Dash({user,D,P,ST,AN,logout}) {
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const tp={D,P,ST,AN,vu,isA};
   return (
-    <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-        <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
+    <div style={{maxWidth:500,margin:"0 auto",padding:"0 0 80px"}}>
+      <div style={{background:"#1a2a5e",padding:"16px 16px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <Logo s={26} full={false}/>
+          <div>
+            <div style={{fontSize:10,color:"#cc2222",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div>
+            <div style={{fontSize:16,fontWeight:900,color:"#fff"}}>{user.name}</div>
+          </div>
+        </div>
         <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setSc("changepwd")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>🔑</button>
-          <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
+          <button onClick={()=>setSc("changepwd")} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:11,padding:"7px 10px",cursor:"pointer",color:"#fff"}}>🔑</button>
+          <button onClick={logout} style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,fontSize:12,padding:"8px 12px",cursor:"pointer",color:"#fff",fontWeight:600}}>Logout</button>
         </div>
       </div>
       <div style={{display:"flex",gap:5,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
