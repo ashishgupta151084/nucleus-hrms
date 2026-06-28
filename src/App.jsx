@@ -614,7 +614,7 @@ function Lv({user,D,P,ST,setSc}) {
 
 function Notif({user,D,P,setSc}) {
   const ns=(D.notifications||[]).filter(n=>n.userId===user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts));
-  const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true});
+  const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true}));
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
