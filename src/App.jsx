@@ -104,6 +104,17 @@ const PLANS={
   enterprise:{name:"Enterprise",maxUsers:999,price:5999},
 };
 const ROLE_LABELS={admin:"Admin",hr:"HR Manager",hod:"HOD",branch_head:"Branch Head",manager:"Manager",staff:"Staff"};
+const WEEKLY_OFF_OPTIONS=[
+  {value:"sun",label:"Sunday Only"},
+  {value:"sun_sat",label:"Saturday & Sunday"},
+  {value:"sun_1stsat",label:"Sunday + 1st Saturday"},
+  {value:"sun_2ndsat",label:"Sunday + 2nd Saturday"},
+  {value:"sun_3rdsat",label:"Sunday + 3rd Saturday"},
+  {value:"sun_4thsat",label:"Sunday + 4th Saturday"},
+  {value:"sun_altsat",label:"Sunday + Alternate Saturdays"},
+  {value:"sun_1st3rdsat",label:"Sunday + 1st & 3rd Saturday"},
+  {value:"sun_2nd4thsat",label:"Sunday + 2nd & 4th Saturday"},
+];
 const getSatWeek=d=>Math.ceil(d.getDate()/7);
 const countMonthlyGrace=(att,uid,mon)=>(att||[]).filter(a=>a.userId===uid&&a.date&&a.date.startsWith(mon)&&a.graceUsed===true).length;
 const SEED={
@@ -165,10 +176,14 @@ function Cam({onDone,onCancel}) {
     onDone(c.toDataURL("image/jpeg",0.7));
   };
   if(err) return (
-    <div style={{textAlign:"center",padding:20,color:G.rd}}>
+    <div style={{textAlign:"center",padding:20}}>
       <div style={{fontSize:36}}>📷</div>
-      <p style={{fontSize:13}}>{err}</p>
-      <button onClick={onCancel} style={B(G.dim)}>Back</button>
+      <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{err}</p>
+      <div style={{display:"flex",gap:8,flexDirection:"column"}}>
+        <button onClick={()=>{setErr(null);navigator.mediaDevices?.getUserMedia({video:{facingMode:"user"}}).then(s=>{sr.current=s;if(vr.current){vr.current.srcObject=s;setOk(true);}}).catch(()=>setErr("Camera still unavailable."));}} style={{...B(G.gold),color:"#000",fontWeight:700}}>🔄 Retry Camera</button>
+        <button onClick={()=>onDone(null)} style={{...B(G.bl)}}>Continue Without Selfie</button>
+        <button onClick={onCancel} style={B(G.dim)}>Back</button>
+      </div>
     </div>
   );
   return (
@@ -315,7 +330,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         setLocErr(`You are ${Math.round(closest?.d||0)}m away from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). Use WFH if working remotely.`);
         setStep("err");
       }
-    },()=>{setLocErr("Could not get location.");setStep("err");},{enableHighAccuracy:true,timeout:15000});
+    },(e)=>{setLocErr("Could not get GPS location. Please ensure location is enabled in your browser/phone settings and try again.");setStep("err");},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
   };
   const doIn=()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
@@ -373,7 +388,14 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                 <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Confirm Check-In ✓</button>
               </div>
             )}
-            {step==="err"&&<div style={{textAlign:"center"}}><div style={{fontSize:32,marginBottom:8}}>🚫</div><p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p><button onClick={()=>setStep("idle")} style={B(G.dim)}>Try Again</button></div>}
+            {step==="err"&&<div style={{textAlign:"center",padding:8}}>
+              <div style={{fontSize:32,marginBottom:8}}>🚫</div>
+              <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                <button onClick={()=>setStep("idle")} style={{...B(G.gold),color:"#000",fontWeight:700}}>🔄 Try Again</button>
+                <button onClick={()=>{setWfh(true);setStep("idle");}} style={B(G.bl)}>🏠 Switch to WFH</button>
+              </div>
+            </div>}
           </>
         ):(
           <div>
@@ -535,7 +557,14 @@ function Lv({user,D,P,ST,setSc}) {
       <div style={K}>
         <div style={{fontWeight:800,marginBottom:10,color:G.gold}}>Apply for Leave</div>
         <FRow label="Type"><select style={I} value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{Object.keys(pol).map(t=><option key={t} value={t}>{tL[t]||t} ({pol[t]-used(t)} left)</option>)}</select></FRow>
-        {form.type==="halfday"&&<FRow label="Session"><select style={I} value={form.session} onChange={e=>setForm({...form,session:e.target.value})}><option value="morning">Morning</option><option value="afternoon">Afternoon</option></select></FRow>}
+        {form.type==="halfday"&&(
+          <FRow label="Half Day Session">
+            <div style={{display:"flex",gap:8}}>
+              <button type="button" onClick={()=>setForm({...form,session:"morning"})} style={{...B(form.session==="morning"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="morning"?"#000":"#fff",border:form.session==="morning"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌅 Morning</button>
+              <button type="button" onClick={()=>setForm({...form,session:"afternoon"})} style={{...B(form.session==="afternoon"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="afternoon"?"#000":"#fff",border:form.session==="afternoon"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌇 Afternoon</button>
+            </div>
+          </FRow>
+        )}
         {form.type==="early"&&<FRow label="Early Time"><input type="time" style={I} value={form.earlyTime} onChange={e=>setForm({...form,earlyTime:e.target.value})}/></FRow>}
         {(form.type==="halfday"||form.type==="early")
           ?<FRow label="Date"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value,to:e.target.value})}/></FRow>
@@ -580,9 +609,14 @@ function Notif({user,D,P,setSc}) {
 }
 
 function Reg({user,D,P,ST,setSc}) {
-  const [f,setF]=useState({date:tod(),reason:"",checkIn:"09:30",checkOut:"18:30"});
+  const [f,setF]=useState({date:tod(),reason:"",checkIn:"09:30",checkOut:"18:30",session:"full"});
+  const MAX_REG=3; // max regularizations per month
+  const mon=tod().substr(0,7);
+  const usedReg=(D.regularizations||[]).filter(r=>r.userId===user.id&&r.date&&r.date.startsWith(mon)).length;
+  const remReg=Math.max(0,MAX_REG-usedReg);
   const submit=()=>{
     if(!f.reason.trim())return ST("Please add reason","error");
+    if(usedReg>=MAX_REG)return ST(`You have used all ${MAX_REG} regularizations for this month`,"error");
     addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"});
     ST("📝 Submitted!");setSc("home");
   };
@@ -593,7 +627,19 @@ function Reg({user,D,P,ST,setSc}) {
         <h2 style={{margin:0,fontSize:17,fontWeight:800,color:G.gold}}>Regularization</h2>
       </div>
       <div style={K}>
+        <div style={{background:remReg===0?"#1a0000":"#001a0f",border:`1px solid ${remReg===0?G.rd:G.gr}`,borderRadius:10,padding:"8px 12px",marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:remReg===0?G.rd:G.gr}}>
+            {remReg===0?`⚠️ No regularizations left this month`:`✅ ${remReg} of ${MAX_REG} regularizations remaining this month`}
+          </div>
+        </div>
         <FRow label="Date"><input type="date" style={I} value={f.date} onChange={e=>setF({...f,date:e.target.value})}/></FRow>
+        <FRow label="Session">
+          <select style={I} value={f.session||"full"} onChange={e=>setF({...f,session:e.target.value})}>
+            <option value="full">Full Day</option>
+            <option value="morning">Morning Only (checkout later)</option>
+            <option value="evening">Evening Only (checkin done)</option>
+          </select>
+        </FRow>
         <div style={{display:"flex",gap:8}}><FRow label="Check-in"><input type="time" style={I} value={f.checkIn} onChange={e=>setF({...f,checkIn:e.target.value})}/></FRow><FRow label="Check-out"><input type="time" style={I} value={f.checkOut} onChange={e=>setF({...f,checkOut:e.target.value})}/></FRow></div>
         <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:70}} value={f.reason} onChange={e=>setF({...f,reason:e.target.value})} placeholder="Why was attendance missed?"/></FRow>
         <div style={{display:"flex",gap:8}}><button onClick={submit} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Submit</button><button onClick={()=>setSc("home")} style={{...B(G.dim),flex:1}}>Cancel</button></div>
@@ -608,7 +654,11 @@ function Dash({user,D,P,ST,AN,logout}) {
   const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
-  const vu=isA?D.users.filter(u=>u.role!=="admin"):isHOD?D.users.filter(u=>u.teamId===user.teamId&&u.role!=="admin"):D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId));
+  const vu=isA||isHR
+    ?D.users.filter(u=>u.role!=="admin")
+    :isHOD
+    ?D.users.filter(u=>u.teamId===user.teamId&&u.role!=="admin")
+    :D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId)||u.id===user.id);
   const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const tp={D,P,ST,AN,vu,isA};
@@ -845,7 +895,16 @@ function RT({D,vu,P,ST,AN}) {
       const ea=(D.attendance||[]).find(a=>a.userId===r.userId&&a.date===r.date);
       if(ea)updateAttendance(ea.id,{status:"present",lateBy:0,lateApproved:true});
     } else {
-      addAttendance({id:gid(),userId:r.userId,userName:r.userName,teamId:r.teamId,date:r.date,checkIn:new Date(`${r.date}T${r.checkIn}`).toISOString(),checkOut:new Date(`${r.date}T${r.checkOut}`).toISOString(),officeName:"Regularized",status:"present",lateBy:0});
+      // Only add checkOut if session is full day, not morning (allow real checkout)
+      const isMorning=r.session==="morning";
+      addAttendance({
+        id:gid(),userId:r.userId,userName:r.userName,teamId:r.teamId,
+        date:r.date,
+        checkIn:new Date(`${r.date}T${r.checkIn}`).toISOString(),
+        checkOut:isMorning?null:new Date(`${r.date}T${r.checkOut}`).toISOString(),
+        officeName:"Regularized",status:"present",lateBy:0,
+        regularized:true,session:r.session||"full"
+      });
     }
     updateReg(id,{status:"approved",reviewedOn:new Date().toISOString()});
     AN(r.userId,`Your ${r.type==="late_approval"?"late approval":"regularization"} for ${r.date} has been approved.`,"success");ST("✅ Approved!");
@@ -1165,7 +1224,7 @@ function OC({D,P,ST}) {
     navigator.geolocation?.getCurrentPosition(p=>{
       setF(prev=>({...prev,lat:p.coords.latitude.toFixed(6),lng:p.coords.longitude.toFixed(6)}));
       setDt(false);
-    },()=>{ST("Cannot detect location","error");setDt(false);},{enableHighAccuracy:true,timeout:10000});
+    },()=>{ST("Cannot detect location","error");setDt(false);},{enableHighAccuracy:true,timeout:15000,maximumAge:30000});
   };
 
   const searchLocation=async()=>{
