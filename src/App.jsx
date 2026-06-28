@@ -8,6 +8,9 @@ import {
   addNotification, updateNotification, onNotifications
 } from "./firebase";
 
+// Strip undefined values before saving to Firestore
+const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
+
 // ── MSG91 WhatsApp Notifications ─────────────────────────────────
 // Sign up at msg91.com, get your AUTH_KEY and create templates
 const MSG91_AUTH = "YOUR_MSG91_AUTH_KEY"; // Replace with your MSG91 auth key
@@ -238,7 +241,7 @@ export default function App() {
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
   const P=useCallback(nd=>{
     setD(nd);
-    setConfig({
+    setConfig(clean({
       users:nd.users,
       offices:nd.offices,
       teams:nd.teams,
@@ -246,13 +249,13 @@ export default function App() {
       leavePolicy:nd.leavePolicy,
       holidays:nd.holidays,
       companyName:nd.companyName,
-      ...(nd.firmId&&{firmId:nd.firmId}),
-      ...(nd.firmPlan&&{firmPlan:nd.firmPlan}),
-      ...(nd.firmTrial&&{firmTrial:nd.firmTrial}),
-    });
+      firmId:nd.firmId||null,
+      firmPlan:nd.firmPlan||null,
+      firmTrial:nd.firmTrial||null,
+    }));
   },[]);
   const AN=useCallback((uid,msg,type="info")=>{
-    addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
+    addNotification(clean({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false}));
   },[]);
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
@@ -329,8 +332,15 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     setSelfie(img);
     if(wfh){setStep("confirm");return;}
     setStep("loc");
-    navigator.geolocation?.getCurrentPosition(pos=>{
-      const{latitude:la,longitude:lo}=pos.coords;setGps({lat:la,lng:lo});
+    if(!navigator.geolocation){
+      setLocErr("GPS not supported on this device/browser.");
+      setStep("err");
+      return;
+    }
+    // First try fast cached position, then high accuracy
+    const checkLocation=(pos)=>{
+      const{latitude:la,longitude:lo,accuracy:ac}=pos.coords;
+      setGps({lat:la,lng:lo,ac:Math.round(ac)});
       const assignedOffices=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
       if(assignedOffices.length===0){setOffice({name:"Remote"});setStep("confirm");return;}
       const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200));
@@ -338,14 +348,20 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         setOffice(near);setStep("confirm");
       } else {
         const closest=assignedOffices.reduce((b,o)=>{const d=dist(la,lo,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        setLocErr(`You are ${Math.round(closest?.d||0)}m away from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). Use WFH if working remotely.`);
+        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). GPS accuracy: ±${Math.round(ac)}m. Try moving outside or use WFH.`);
         setStep("err");
       }
-    },(e)=>{setLocErr("Could not get GPS location. Please ensure location is enabled in your browser/phone settings and try again.");setStep("err");},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+    };
+    const onErr=(e)=>{
+      const msgs={1:"Location permission denied. Please allow location in browser settings.",2:"Location unavailable. Check if GPS is on.",3:"Location request timed out. Please try again."};
+      setLocErr(msgs[e.code]||"Could not get location. Please try again.");
+      setStep("err");
+    };
+    navigator.geolocation.getCurrentPosition(checkLocation,onErr,{enableHighAccuracy:true,timeout:20000,maximumAge:0});
   };
   const doIn=()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
-    addAttendance({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
+    addAttendance(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
     ST(wfh?"🏠 WFH done!":lb>30?`⚠️ ${lb}m late`:"✅ Checked in!");setStep("done");
   };
   const doOut=()=>{
@@ -390,7 +406,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
               </>
             )}
             {step==="cam"&&<Cam onDone={onSelfie} onCancel={()=>setStep("idle")}/>}
-            {step==="loc"&&<div style={{textAlign:"center",padding:18}}><div style={{fontSize:34,marginBottom:8}}>📍</div><p style={{color:G.mut}}>Verifying location…</p><div style={{width:32,height:32,border:`4px solid ${G.gold}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto"}}/></div>}
+            {step==="loc"&&<div style={{textAlign:"center",padding:18}}><div style={{fontSize:34,marginBottom:8}}>📍</div><p style={{color:G.gold,fontWeight:700,marginBottom:4}}>Getting your location…</p><p style={{color:G.mut,fontSize:12,marginBottom:12}}>Please wait up to 20 seconds.</p><div style={{width:32,height:32,border:`4px solid ${G.gold}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto"}}/><p style={{color:G.dim,fontSize:11,marginTop:10}}>Enable location in phone settings if stuck</p></div>}
             {step==="confirm"&&(
               <div style={{textAlign:"center"}}>
                 {selfie&&<img src={selfie} style={{width:90,height:90,borderRadius:"50%",objectFit:"cover",border:`4px solid ${G.gold}`,marginBottom:10}}/>}
@@ -541,7 +557,7 @@ function Lv({user,D,P,ST,setSc}) {
     if(user.employeeType==="articled"&&form.type!=="sick"&&form.type!=="studyleave")
       return ST("Articled Assistants can only apply Sick Leave or Study Leave (ICAI rules)","error");
     if((pol[form.type]||0)-used(form.type)<=0)return ST("No leaves remaining","error");
-    addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"});
+    addLeave(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"}));
     const mgr2=(D.users||[]).find(u=>u.id===user.reportingTo);
     if(mgr2)notifyLeaveReq(mgr2, user.name, form.type, form.from);
     ST("✅ Leave applied! Manager notified.");setForm({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
@@ -628,7 +644,7 @@ function Reg({user,D,P,ST,setSc}) {
   const submit=()=>{
     if(!f.reason.trim())return ST("Please add reason","error");
     if(usedReg>=MAX_REG)return ST(`You have used all ${MAX_REG} regularizations for this month`,"error");
-    addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"});
+    addReg(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"}));
     ST("📝 Submitted!");setSc("home");
   };
   return (
@@ -793,7 +809,7 @@ function AT({D,vu,P,ST}) {
   const mk=(uid,status)=>{
     const ex=D.attendance.find(a=>a.userId===uid&&a.date===fd);
     if(ex){updateAttendance(ex.id,{status});}
-    else{addAttendance({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
+    else{addAttendance(clean({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
     ST(`Marked ${status}`);
   };
   const sb={present:G.gr,late:G.am,wfh:G.bl,absent:G.rd};
@@ -1313,7 +1329,7 @@ function LateApproval({user,D,P,ST,AN,setSc}) {
   const submit=()=>{
     if(!reason.trim())return ST("Please provide a reason","error");
     if(!rec)return ST("No attendance record found today","error");
-    addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:rec.checkIn.split("T")[1].substr(0,5),checkOut:"18:30",reason,type:"late_approval",lateBy:rec.lateBy,appliedOn:new Date().toISOString(),status:"pending"});
+    addReg(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:rec.checkIn.split("T")[1].substr(0,5),checkOut:"18:30",reason,type:"late_approval",lateBy:rec.lateBy,appliedOn:new Date().toISOString(),status:"pending"}));
     if(mgr)AN(mgr.id,`${user.name} has requested late arrival approval for today (${rec.lateBy} mins late). Reason: ${reason}`,"info");
     ST("✅ Request sent to your manager!");setSc("home");
   };
