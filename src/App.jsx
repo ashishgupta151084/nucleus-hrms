@@ -255,7 +255,7 @@ export default function App() {
     }));
   },[]);
   const AN=useCallback((uid,msg,type="info")=>{
-    addNotification(clean({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false}));
+    addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
   },[]);
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
@@ -361,7 +361,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   };
   const doIn=()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
-    addAttendance(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
+    addAttendance({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
     ST(wfh?"🏠 WFH done!":lb>30?`⚠️ ${lb}m late`:"✅ Checked in!");setStep("done");
   };
   const doOut=()=>{
@@ -557,7 +557,7 @@ function Lv({user,D,P,ST,setSc}) {
     if(user.employeeType==="articled"&&form.type!=="sick"&&form.type!=="studyleave")
       return ST("Articled Assistants can only apply Sick Leave or Study Leave (ICAI rules)","error");
     if((pol[form.type]||0)-used(form.type)<=0)return ST("No leaves remaining","error");
-    addLeave(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"}));
+    addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"});
     const mgr2=(D.users||[]).find(u=>u.id===user.reportingTo);
     if(mgr2)notifyLeaveReq(mgr2, user.name, form.type, form.from);
     ST("✅ Leave applied! Manager notified.");setForm({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
@@ -614,7 +614,7 @@ function Lv({user,D,P,ST,setSc}) {
 
 function Notif({user,D,P,setSc}) {
   const ns=(D.notifications||[]).filter(n=>n.userId===user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts));
-  const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true}));
+  const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true});
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -644,7 +644,7 @@ function Reg({user,D,P,ST,setSc}) {
   const submit=()=>{
     if(!f.reason.trim())return ST("Please add reason","error");
     if(usedReg>=MAX_REG)return ST(`You have used all ${MAX_REG} regularizations for this month`,"error");
-    addReg(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"}));
+    addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...f,appliedOn:new Date().toISOString(),status:"pending"});
     ST("📝 Submitted!");setSc("home");
   };
   return (
@@ -809,7 +809,7 @@ function AT({D,vu,P,ST}) {
   const mk=(uid,status)=>{
     const ex=D.attendance.find(a=>a.userId===uid&&a.date===fd);
     if(ex){updateAttendance(ex.id,{status});}
-    else{addAttendance(clean({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
+    else{addAttendance({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
     ST(`Marked ${status}`);
   };
   const sb={present:G.gr,late:G.am,wfh:G.bl,absent:G.rd};
@@ -1329,7 +1329,7 @@ function LateApproval({user,D,P,ST,AN,setSc}) {
   const submit=()=>{
     if(!reason.trim())return ST("Please provide a reason","error");
     if(!rec)return ST("No attendance record found today","error");
-    addReg(clean({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:rec.checkIn.split("T")[1].substr(0,5),checkOut:"18:30",reason,type:"late_approval",lateBy:rec.lateBy,appliedOn:new Date().toISOString(),status:"pending"}));
+    addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:rec.checkIn.split("T")[1].substr(0,5),checkOut:"18:30",reason,type:"late_approval",lateBy:rec.lateBy,appliedOn:new Date().toISOString(),status:"pending"});
     if(mgr)AN(mgr.id,`${user.name} has requested late arrival approval for today (${rec.lateBy} mins late). Reason: ${reason}`,"info");
     ST("✅ Request sent to your manager!");setSc("home");
   };
