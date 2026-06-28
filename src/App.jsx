@@ -269,7 +269,7 @@ export default function App() {
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-      {sc==="login"&&<Login login={login} name={D.companyName}/>}
+      {sc==="login"&&<Login login={login} name={D.companyName} setSc={setSc}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
       {sc==="lv"&&<Lv {...props}/>}
@@ -288,7 +288,7 @@ export default function App() {
   );
 }
 
-function Login({login,name}) {
+function Login({login,name,setSc}) {
   const [e,setE]=useState(""),[p,setP]=useState("");
   return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${G.bg},${G.navy})`}}>
@@ -675,7 +675,7 @@ function Reg({user,D,P,ST,setSc}) {
   );
 }
 
-function Dash({user,D,P,ST,AN,logout}) {
+function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
   const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
