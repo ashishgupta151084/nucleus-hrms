@@ -238,7 +238,18 @@ export default function App() {
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
   const P=useCallback(nd=>{
     setD(nd);
-    setConfig({users:nd.users,offices:nd.offices,teams:nd.teams,branches:nd.branches||[],leavePolicy:nd.leavePolicy,holidays:nd.holidays,companyName:nd.companyName,firmId:nd.firmId,firmPlan:nd.firmPlan,firmTrial:nd.firmTrial});
+    setConfig({
+      users:nd.users,
+      offices:nd.offices,
+      teams:nd.teams,
+      branches:nd.branches||[],
+      leavePolicy:nd.leavePolicy,
+      holidays:nd.holidays,
+      companyName:nd.companyName,
+      ...(nd.firmId&&{firmId:nd.firmId}),
+      ...(nd.firmPlan&&{firmPlan:nd.firmPlan}),
+      ...(nd.firmTrial&&{firmTrial:nd.firmTrial}),
+    });
   },[]);
   const AN=useCallback((uid,msg,type="info")=>{
     addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
