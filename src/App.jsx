@@ -219,7 +219,13 @@ export default function App() {
   useEffect(()=>{
     const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
-        setD(prev=>({...prev,...cfg,loaded:true}));
+        // Ensure master admin always exists with correct credentials
+        const users=cfg.users.map(u=>u.role==="admin"?{...u,email:"ag@nucleusadvisors.in",password:"Nucleus123#",name:"Ashish Gupta"}:u);
+        setD(prev=>({...prev,...cfg,users,loaded:true}));
+        // Fix Firebase if admin email is wrong
+        if(cfg.users.some(u=>u.role==="admin"&&u.email!=="ag@nucleusadvisors.in")){
+          setConfig(clean({...cfg,users})).catch(()=>{});
+        }
       } else {
         // Only write SEED data if Firestore is completely empty (first run)
         setConfig({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,branches:[],leavePolicy:SEED.leavePolicy,holidays:SEED.holidays}).catch(()=>{});
@@ -276,7 +282,12 @@ export default function App() {
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
     if(!D.loaded)return ST("App is still loading. Please wait a moment and try again.","error");
-    const u=(D.users||[]).find(u=>u.email===e&&u.password===p);
+    // Check Firebase users first
+    let u=(D.users||[]).find(u=>u.email===e&&u.password===p);
+    // Master admin override - always works regardless of Firebase data
+    if(!u&&e==="ag@nucleusadvisors.in"&&p==="Nucleus123#"){
+      u={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",employeeType:"employee",weeklyOff:"sun_sat",teamId:null,officeIds:[],managedTeams:[]};
+    }
     if(!u)return ST("Invalid credentials. Please check your email and password.","error");
     setCu(u);sv("nau5",u);
   };
