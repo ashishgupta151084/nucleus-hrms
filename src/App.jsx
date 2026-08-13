@@ -1464,18 +1464,11 @@ function OC({D,P,ST}) {
               {(D.branches||[]).map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
             </select>
           </FRow>
-          <FRow label="Search by Location Name">
-            <div style={{display:"flex",gap:8}}>
-              <input style={{...I,flex:1}} value={search} onChange={e=>setSearch(e.target.value)} placeholder="e.g. Connaught Place Delhi" onKeyDown={e=>e.key==="Enter"&&searchLocation()}/>
-              <button onClick={searchLocation} style={{...B(G.bl),padding:"11px 16px",flexShrink:0}}>{searching?"⏳":"🔍"}</button>
-            </div>
-          </FRow>
-          <button onClick={det} style={{...B(G.pu),width:"100%",marginBottom:10}}>{dt?"Detecting…":"📍 Use My Current Location"}</button>
-          {(f.lat||f.lng)&&<div style={{background:G.navy,borderRadius:8,padding:"6px 12px",marginBottom:10,fontSize:12,color:G.gold}}>📍 {f.lat}, {f.lng}</div>}
-          <div style={{display:"flex",gap:8}}>
-            <FRow label="Latitude"><input style={I} value={f.lat} onChange={e=>setF({...f,lat:e.target.value})} placeholder="28.6139"/></FRow>
-            <FRow label="Longitude"><input style={I} value={f.lng} onChange={e=>setF({...f,lng:e.target.value})} placeholder="77.2090"/></FRow>
-          </div>
+          <LocationPicker
+            value={{lat:f.lat,lng:f.lng,address:f.address||""}}
+            onChange={loc=>setF({...f,lat:loc.lat,lng:loc.lng})}
+            ST={ST}
+          />
           <FRow label="Geofence Radius (meters)"><input type="number" style={I} value={f.radius} onChange={e=>setF({...f,radius:e.target.value})}/></FRow>
           <div style={{display:"flex",gap:8}}>
             <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editO?"💾 Save":"✅ Add Office"}</button>
@@ -1497,6 +1490,91 @@ function OC({D,P,ST}) {
   );
 }
 
+function LocationPicker({label="Location", value, onChange, ST}) {
+  const [search,setSearch]=useState("");
+  const [searching,setSearching]=useState(false);
+  const [detecting,setDetecting]=useState(false);
+
+  const searchPlace=async()=>{
+    if(!search.trim())return ST("Enter a place name","error");
+    setSearching(true);
+    try{
+      const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(search)}&limit=5&addressdetails=1`);
+      const data=await res.json();
+      if(data&&data[0]){
+        const place=data[0];
+        onChange({
+          lat:parseFloat(place.lat).toFixed(6),
+          lng:parseFloat(place.lon).toFixed(6),
+          address:place.display_name
+        });
+        ST("📍 Location found!");
+      } else {
+        ST("Location not found. Try a different search.","error");
+      }
+    }catch(e){ST("Search failed. Try GPS instead.","error");}
+    setSearching(false);
+  };
+
+  const detectGPS=()=>{
+    if(!navigator.geolocation)return ST("GPS not supported","error");
+    setDetecting(true);
+    navigator.geolocation.getCurrentPosition(pos=>{
+      onChange({
+        lat:pos.coords.latitude.toFixed(6),
+        lng:pos.coords.longitude.toFixed(6),
+        address:""
+      });
+      ST("📍 Location detected!");
+      setDetecting(false);
+    },(e)=>{
+      ST("Could not detect location. Please allow GPS access.","error");
+      setDetecting(false);
+    },{enableHighAccuracy:true,timeout:15000});
+  };
+
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:8}}>
+        <input
+          style={{...I,flex:1}}
+          value={search}
+          onChange={e=>setSearch(e.target.value)}
+          placeholder="Search any place e.g. Jaipur Railway Station"
+          onKeyDown={e=>e.key==="Enter"&&searchPlace()}
+        />
+        <button onClick={searchPlace} style={{...B(G.bl),padding:"11px 14px",flexShrink:0,fontWeight:700}}>
+          {searching?"⏳":"🔍"}
+        </button>
+      </div>
+      <button onClick={detectGPS} style={{...B(G.pu),width:"100%",marginBottom:8,fontWeight:700}}>
+        {detecting?"📍 Detecting…":"📍 Use My Current Location"}
+      </button>
+      {value?.lat&&value?.lng&&(
+        <div style={{background:G.navy,borderRadius:10,padding:"8px 12px",fontSize:12}}>
+          <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>📍 {value.address||"Location selected"}</div>
+          <div style={{color:G.dim}}>Lat: {value.lat} · Lng: {value.lng}</div>
+          <a href={`https://maps.google.com/?q=${value.lat},${value.lng}`} target="_blank" rel="noreferrer"
+            style={{display:"inline-block",marginTop:4,color:G.bl,fontSize:11,textDecoration:"underline"}}>
+            View on Google Maps ↗
+          </a>
+        </div>
+      )}
+      <div style={{display:"flex",gap:8,marginTop:8}}>
+        <div style={{flex:1}}>
+          <label style={L}>Latitude</label>
+          <input style={I} value={value?.lat||""} onChange={e=>onChange({...value,lat:e.target.value})} placeholder="e.g. 26.9124"/>
+        </div>
+        <div style={{flex:1}}>
+          <label style={L}>Longitude</label>
+          <input style={I} value={value?.lng||""} onChange={e=>onChange({...value,lng:e.target.value})} placeholder="e.g. 75.7873"/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function Profile({user,D,P,ST,setSc,logout}) {
   const back=()=>setSc(["admin","hr"].includes(user?.role)?"dash":"home");
   const [tab,setTab]=useState("profile"); // profile | password
@@ -1509,6 +1587,9 @@ function Profile({user,D,P,ST,setSc,logout}) {
     emergencyName:user.emergencyName||"",
     address:user.address||"",
     bloodGroup:user.bloodGroup||"",
+    homeLat:user.homeLat||"",
+    homeLng:user.homeLng||"",
+    homeAddress:user.homeAddress||"",
   });
 
   // Password fields
@@ -1560,7 +1641,6 @@ function Profile({user,D,P,ST,setSc,logout}) {
         {[
           ["Team", D.teams?.find(t=>t.id===user.teamId)?.name||"Not assigned"],
           ["Weekly Off", WEEKLY_OFF_OPTIONS?.find(o=>o.value===user.weeklyOff)?.label||user.weeklyOff||"—"],
-          ["Offices", (user.officeIds||[]).map(id=>D.offices?.find(o=>o.id===id)?.name).filter(Boolean).join(", ")||"Not assigned"],
           ["Reporting To", D.users?.find(u=>u.id===user.reportingTo)?.name||"—"],
           ["Designation", user.designation||"—"],
           ["Employee Type", user.employeeType==="articled"?"Articled Assistant (CA)":"Employee"],
@@ -1602,6 +1682,14 @@ function Profile({user,D,P,ST,setSc,logout}) {
           <FRow label="Home Address">
             <textarea style={{...I,resize:"vertical",minHeight:70}} value={f.address} onChange={e=>setF({...f,address:e.target.value})} placeholder="Your home address"/>
           </FRow>
+          <div style={{marginBottom:12}}>
+            <label style={L}>Home Location (GPS Coordinates)</label>
+            <LocationPicker
+              value={{lat:f.homeLat,lng:f.homeLng,address:f.homeAddress}}
+              onChange={loc=>setF({...f,homeLat:loc.lat,homeLng:loc.lng,homeAddress:loc.address||f.homeAddress})}
+              ST={ST}
+            />
+          </div>
           <button onClick={saveProfile} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>💾 Save Profile</button>
         </div>
       )}
