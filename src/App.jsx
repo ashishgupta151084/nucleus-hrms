@@ -1490,42 +1490,65 @@ function OC({D,P,ST}) {
   );
 }
 
-function LocationPicker({label="Location", value, onChange, ST}) {
-  const [search,setSearch]=useState("");
+function LocationPicker({value, onChange, ST}) {
+  const [search,setSearch]=useState(value?.address||"");
+  const [results,setResults]=useState([]);
   const [searching,setSearching]=useState(false);
   const [detecting,setDetecting]=useState(false);
+  const [showDrop,setShowDrop]=useState(false);
+  const timer=useRef(null);
 
-  const searchPlace=async()=>{
-    if(!search.trim())return ST("Enter a place name","error");
+  // Auto-search as user types (debounced 600ms)
+  const handleType=e=>{
+    const q=e.target.value;
+    setSearch(q);
+    setShowDrop(true);
+    clearTimeout(timer.current);
+    if(q.trim().length<3){setResults([]);return;}
+    timer.current=setTimeout(()=>doSearch(q),600);
+  };
+
+  const doSearch=async(q)=>{
     setSearching(true);
     try{
-      const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(search)}&limit=5&addressdetails=1`);
+      const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=6&addressdetails=1&accept-language=en`);
       const data=await res.json();
-      if(data&&data[0]){
-        const place=data[0];
-        onChange({
-          lat:parseFloat(place.lat).toFixed(6),
-          lng:parseFloat(place.lon).toFixed(6),
-          address:place.display_name
-        });
-        ST("📍 Location found!");
-      } else {
-        ST("Location not found. Try a different search.","error");
-      }
-    }catch(e){ST("Search failed. Try GPS instead.","error");}
+      setResults(data||[]);
+      if(!data||data.length===0)ST("No results found. Try a different search.","error");
+    }catch(e){ST("Search failed. Check internet connection.","error");}
     setSearching(false);
+  };
+
+  const selectResult=r=>{
+    const addr=r.display_name;
+    const lat=parseFloat(r.lat).toFixed(6);
+    const lng=parseFloat(r.lon).toFixed(6);
+    setSearch(addr);
+    setResults([]);
+    setShowDrop(false);
+    onChange({lat,lng,address:addr});
   };
 
   const detectGPS=()=>{
     if(!navigator.geolocation)return ST("GPS not supported","error");
     setDetecting(true);
     navigator.geolocation.getCurrentPosition(pos=>{
-      onChange({
-        lat:pos.coords.latitude.toFixed(6),
-        lng:pos.coords.longitude.toFixed(6),
-        address:""
-      });
-      ST("📍 Location detected!");
+      const lat=pos.coords.latitude.toFixed(6);
+      const lng=pos.coords.longitude.toFixed(6);
+      // Reverse geocode to get address
+      fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`)
+        .then(r=>r.json())
+        .then(d=>{
+          const addr=d.display_name||`${lat}, ${lng}`;
+          setSearch(addr);
+          onChange({lat,lng,address:addr});
+          ST("📍 Location detected!");
+        })
+        .catch(()=>{
+          setSearch(`${lat}, ${lng}`);
+          onChange({lat,lng,address:`${lat}, ${lng}`});
+          ST("📍 Location detected!");
+        });
       setDetecting(false);
     },(e)=>{
       ST("Could not detect location. Please allow GPS access.","error");
@@ -1534,33 +1557,56 @@ function LocationPicker({label="Location", value, onChange, ST}) {
   };
 
   return (
-    <div>
-      <div style={{display:"flex",gap:8,marginBottom:8}}>
-        <input
-          style={{...I,flex:1}}
-          value={search}
-          onChange={e=>setSearch(e.target.value)}
-          placeholder="Search any place e.g. Jaipur Railway Station"
-          onKeyDown={e=>e.key==="Enter"&&searchPlace()}
-        />
-        <button onClick={searchPlace} style={{...B(G.bl),padding:"11px 14px",flexShrink:0,fontWeight:700}}>
-          {searching?"⏳":"🔍"}
-        </button>
+    <div style={{position:"relative"}}>
+      {/* Search box */}
+      <div style={{display:"flex",gap:8,marginBottom:6}}>
+        <div style={{flex:1,position:"relative"}}>
+          <input
+            style={{...I,paddingRight:searching?"36px":"14px"}}
+            value={search}
+            onChange={handleType}
+            onFocus={()=>results.length>0&&setShowDrop(true)}
+            onBlur={()=>setTimeout(()=>setShowDrop(false),200)}
+            placeholder="🔍 Search any place, landmark, area..."
+          />
+          {searching&&<div style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:16}}>⏳</div>}
+        </div>
       </div>
+
+      {/* Dropdown results */}
+      {showDrop&&results.length>0&&(
+        <div style={{position:"absolute",top:"100%",left:0,right:0,background:G.card,border:`1px solid ${G.gold}`,borderRadius:10,zIndex:999,maxHeight:220,overflowY:"auto",boxShadow:"0 8px 24px rgba(0,0,0,0.4)"}}>
+          {results.map((r,i)=>(
+            <div key={i} onMouseDown={()=>selectResult(r)} style={{padding:"10px 14px",borderBottom:`1px solid ${G.bdr}`,cursor:"pointer",fontSize:12,color:G.txt,display:"flex",gap:8,alignItems:"flex-start"}}
+              onMouseEnter={e=>e.currentTarget.style.background=G.navy}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              <span style={{color:G.gold,flexShrink:0}}>📍</span>
+              <span>{r.display_name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* GPS button */}
       <button onClick={detectGPS} style={{...B(G.pu),width:"100%",marginBottom:8,fontWeight:700}}>
-        {detecting?"📍 Detecting…":"📍 Use My Current Location"}
+        {detecting?"📍 Detecting your location…":"📍 Use My Current GPS Location"}
       </button>
+
+      {/* Selected location display */}
       {value?.lat&&value?.lng&&(
-        <div style={{background:G.navy,borderRadius:10,padding:"8px 12px",fontSize:12}}>
-          <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>📍 {value.address||"Location selected"}</div>
-          <div style={{color:G.dim}}>Lat: {value.lat} · Lng: {value.lng}</div>
+        <div style={{background:G.navy,borderRadius:10,padding:"8px 12px",fontSize:12,marginBottom:8}}>
+          <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>✅ Selected Location</div>
+          <div style={{color:G.txt,marginBottom:4,fontSize:11}}>{value.address||search||"Location selected"}</div>
+          <div style={{color:G.dim,fontSize:11}}>📌 {value.lat}, {value.lng}</div>
           <a href={`https://maps.google.com/?q=${value.lat},${value.lng}`} target="_blank" rel="noreferrer"
             style={{display:"inline-block",marginTop:4,color:G.bl,fontSize:11,textDecoration:"underline"}}>
-            View on Google Maps ↗
+            Verify on Google Maps ↗
           </a>
         </div>
       )}
-      <div style={{display:"flex",gap:8,marginTop:8}}>
+
+      {/* Manual lat/lng */}
+      <div style={{display:"flex",gap:8}}>
         <div style={{flex:1}}>
           <label style={L}>Latitude</label>
           <input style={I} value={value?.lat||""} onChange={e=>onChange({...value,lat:e.target.value})} placeholder="e.g. 26.9124"/>
