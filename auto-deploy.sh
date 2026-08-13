@@ -1,16 +1,14 @@
 #!/bin/bash
-# Nucleus HRMS — Manual Push Deploy
-# Usage: Type 'push' when ready to deploy
+# Nucleus HRMS — Build & Deploy
+# Type 'push' to build and deploy to Firebase
 
 PROJECT="/Users/ashish/Library/CloudStorage/GoogleDrive-ashishgupta151084@gmail.com/My Drive/Claude/Claude_Code/nucleus-hrms"
 
 cd "$PROJECT"
 
 echo "🚀 Nucleus HRMS Deploy Ready"
-echo "📁 Project: $PROJECT"
-echo ""
-echo "Make your changes in VS Code, then type 'push' to deploy."
-echo "Type 'status' to see pending changes."
+echo "Make changes, then type 'push' to build & deploy."
+echo "Type 'status' to see changed files."
 echo "Type 'exit' to quit."
 echo ""
 
@@ -19,24 +17,24 @@ while true; do
 
   case "$cmd" in
     push)
-      CHANGES=$(git status --porcelain)
-      if [ -z "$CHANGES" ]; then
-        echo "⚠️  No changes detected. Edit App.jsx first."
+      echo "🔨 Building..."
+      BUILD_OUTPUT=$(npm run build 2>&1)
+      if echo "$BUILD_OUTPUT" | grep -q "built in"; then
+        echo "✅ Build successful!"
+        echo ""
+        echo "🚀 Deploying to Firebase..."
+        firebase deploy --only hosting
+        echo ""
+        echo "🌐 Live at: https://nucleus-hrms.web.app"
       else
-        echo "📝 Changes found:"
-        git status --short
+        echo "❌ Build failed! Error:"
+        echo "$BUILD_OUTPUT" | grep -A5 "error"
         echo ""
-        git pull origin main --rebase 2>/dev/null
-        git add .
-        git commit -m "Update $(date '+%Y-%m-%d %H:%M:%S')"
-        git push origin main
-        echo ""
-        echo "✅ Pushed! Firebase deploying in ~2 mins."
-        echo "🌐 Check: https://nucleus-hrms.web.app"
+        echo "Fix the error and try push again."
       fi
       ;;
     status)
-      echo "📋 Pending changes:"
+      echo "📋 Changed files:"
       git status --short
       if [ -z "$(git status --porcelain)" ]; then
         echo "  No changes."

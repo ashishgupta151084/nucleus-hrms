@@ -65,7 +65,12 @@ const notifyEscalation = (manager, staffName, days) =>
   sendWA(manager?.mobile, "nucleus_escalation", [staffName, String(days)]);
 
 const gid=()=>Math.random().toString(36).substr(2,9);
-const tod=()=>new Date().toISOString().split("T")[0];
+const tod=()=>{
+  const d=new Date();
+  const off=d.getTimezoneOffset();
+  const local=new Date(d.getTime()-off*60000);
+  return local.toISOString().split("T")[0];
+};
 const fT=(d)=>new Date(d).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
 const fD=(d)=>new Date(d).toLocaleDateString([],{day:"2-digit",month:"short",year:"numeric"});
 const dist=(a,b,c,d)=>{const R=6371000,dL=((c-a)*Math.PI)/180,dl=((d-b)*Math.PI)/180,x=Math.sin(dL/2)**2+Math.cos((a*Math.PI)/180)*Math.cos((c*Math.PI)/180)*Math.sin(dl/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));};
@@ -205,7 +210,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[]});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -214,7 +219,7 @@ export default function App() {
   useEffect(()=>{
     const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
-        setD(prev=>({...prev,...cfg}));
+        setD(prev=>({...prev,...cfg,loaded:true}));
       } else {
         setConfig({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,leavePolicy:SEED.leavePolicy,holidays:SEED.holidays}).catch(()=>{});
       }
@@ -234,7 +239,12 @@ export default function App() {
     if(!cu||["admin","hr"].includes(cu.role))return;
     const w=navigator.geolocation?.watchPosition(p=>{
       updateLiveLocation(cu.id,{lat:p.coords.latitude,lng:p.coords.longitude,ac:Math.round(p.coords.accuracy),ts:new Date().toISOString()});
-    },null,{enableHighAccuracy:true,maximumAge:30000});
+    },(e)=>{
+      // GPS error - retry with low accuracy
+      navigator.geolocation?.getCurrentPosition(p=>{
+        updateLiveLocation(cu.id,{lat:p.coords.latitude,lng:p.coords.longitude,ac:Math.round(p.coords.accuracy),ts:new Date().toISOString()});
+      },null,{enableHighAccuracy:false,maximumAge:60000});
+    },{enableHighAccuracy:true,maximumAge:30000,timeout:30000});
     return()=>navigator.geolocation?.clearWatch(w);
   },[cu?.id]);
 
@@ -259,8 +269,9 @@ export default function App() {
   },[]);
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
+    if(!D.loaded)return ST("App is still loading. Please wait a moment and try again.","error");
     const u=(D.users||[]).find(u=>u.email===e&&u.password===p);
-    if(!u)return ST("Invalid credentials","error");
+    if(!u)return ST("Invalid credentials. Please check your email and password.","error");
     setCu(u);sv("nau5",u);
   };
   const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
@@ -269,7 +280,7 @@ export default function App() {
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-      {sc==="login"&&<Login login={login} name={D.companyName} setSc={setSc}/>}
+      {sc==="login"&&<Login login={login} name={D.companyName} setSc={setSc} D={D}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
       {sc==="lv"&&<Lv {...props}/>}
@@ -288,7 +299,7 @@ export default function App() {
   );
 }
 
-function Login({login,name,setSc}) {
+function Login({login,name,setSc,D}) {
   const [e,setE]=useState(""),[p,setP]=useState("");
   return (
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${G.bg},${G.navy})`}}>
@@ -300,7 +311,8 @@ function Login({login,name,setSc}) {
         <div style={{...K,padding:24,marginBottom:12}}>
           <FRow label="Email"><input style={I} type="email" value={e} onChange={x=>setE(x.target.value)} placeholder="you@nucleusadvisors.in"/></FRow>
           <FRow label="Password"><input style={I} type="password" value={p} onChange={x=>setP(x.target.value)} placeholder="••••••••" onKeyDown={x=>x.key==="Enter"&&login(e,p)}/></FRow>
-          <button onClick={()=>login(e,p)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:"#000",fontWeight:800}}>Sign In →</button>
+          {!D?.loaded&&<div style={{textAlign:"center",marginBottom:8,fontSize:12,color:G.am}}>⏳ Connecting to server… please wait</div>}
+          <button onClick={()=>login(e,p)} style={{...B(!D?.loaded?"#555":`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:D?.loaded?"#000":"#888",fontWeight:800}}>{D?.loaded?"Sign In →":"⏳ Loading…"}</button>
         </div>
         <div style={{textAlign:"center",marginTop:12}}>
           <span onClick={()=>setSc("register")} style={{fontSize:12,color:G.bl,cursor:"pointer",textDecoration:"underline"}}>New CA Firm? Register Free Trial →</span>
@@ -337,27 +349,67 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       setStep("err");
       return;
     }
-    // First try fast cached position, then high accuracy
-    const checkLocation=(pos)=>{
-      const{latitude:la,longitude:lo,accuracy:ac}=pos.coords;
+
+    const startGpsFlow=()=>{
+      runGpsTiers();
+    };
+
+    if(navigator.permissions&&navigator.permissions.query){
+      navigator.permissions.query({name:"geolocation"}).then(result=>{
+        if(result.state==="denied"){
+          setLocErr("Location is blocked for this app. Please go to your phone Settings, then Apps, then Chrome (or your Browser), then Permissions, then Location, then Allow. Then try again.");
+          setStep("err");
+          return;
+        }
+        startGpsFlow();
+      }).catch(()=>startGpsFlow());
+    } else {
+      startGpsFlow();
+    }
+
+    const evaluate=(la,lo,ac)=>{
       setGps({lat:la,lng:lo,ac:Math.round(ac)});
       const assignedOffices=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
       if(assignedOffices.length===0){setOffice({name:"Remote"});setStep("confirm");return;}
-      const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200));
+      const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200)+ac);
       if(near){
         setOffice(near);setStep("confirm");
       } else {
         const closest=assignedOffices.reduce((b,o)=>{const d=dist(la,lo,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). GPS accuracy: ±${Math.round(ac)}m. Try moving outside or use WFH.`);
+        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). GPS accuracy: ±${Math.round(ac)}m. Try moving near a window/outside, or use WFH.`);
         setStep("err");
       }
     };
-    const onErr=(e)=>{
-      const msgs={1:"Location permission denied. Please allow location in browser settings.",2:"Location unavailable. Check if GPS is on.",3:"Location request timed out. Please try again."};
+
+    const onFinalErr=(e)=>{
+      const msgs={1:"Location permission denied. Please allow location access for this site in your phone or browser settings.",2:"Location/GPS appears to be turned OFF on your phone. Please turn on Location in your phone quick settings (swipe down from top) and try again.",3:"Location request timed out. Indoor GPS can be slow. Please try again or move near a window."};
       setLocErr(msgs[e.code]||"Could not get location. Please try again.");
       setStep("err");
     };
-    navigator.geolocation.getCurrentPosition(checkLocation,onErr,{enableHighAccuracy:true,timeout:20000,maximumAge:0});
+
+    const runGpsTiers=()=>{
+      navigator.geolocation.getCurrentPosition(
+        pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
+        (e1)=>{
+          if(e1.code===1){onFinalErr(e1);return;}
+          navigator.geolocation.getCurrentPosition(
+            pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
+            (e2)=>{
+              if(e2.code===1){onFinalErr(e2);return;}
+              navigator.geolocation.getCurrentPosition(
+                pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
+                onFinalErr,
+                {enableHighAccuracy:false,timeout:15000,maximumAge:60000}
+              );
+            },
+            {enableHighAccuracy:true,timeout:25000,maximumAge:0}
+          );
+        },
+        {enableHighAccuracy:true,timeout:5000,maximumAge:60000}
+      );
+    };
+
+    startGpsFlow();
   };
   const doIn=()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
@@ -688,7 +740,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
     :D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId)||u.id===user.id);
   const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
-  const tp={D,P,ST,AN,vu,isA};
+  const tp={D,P,ST,AN,vu,isA,user};
   return (
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
@@ -765,7 +817,13 @@ function OV({D,vu}) {
 
 function LV({D,vu}) {
   const [sel,setSel]=useState(null);
-  const lv=vu.filter(u=>D.liveLocations?.[u.id]),off=vu.filter(u=>!D.liveLocations?.[u.id]);
+  const isRecent=(loc)=>{
+    if(!loc?.ts)return false;
+    const ts=loc.ts?.toDate?loc.ts.toDate():new Date(loc.ts);
+    return (new Date()-ts)<2*60*60*1000; // within 2 hours
+  };
+  const lv=vu.filter(u=>D.liveLocations?.[u.id]&&isRecent(D.liveLocations[u.id]));
+  const off=vu.filter(u=>!D.liveLocations?.[u.id]||!isRecent(D.liveLocations[u.id]));
   return (
     <>
       <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div></div>
@@ -799,57 +857,131 @@ function LV({D,vu}) {
   );
 }
 
-function AT({D,vu,P,ST}) {
-  const [fd,setFd]=useState(tod()),[fu,setFu]=useState("all"),[sel,setSel]=useState(null);
-  const recs=D.attendance.filter(a=>{if(fd&&a.date!==fd)return false;if(fu!=="all"&&a.userId!==fu)return false;return vu.some(u=>u.id===a.userId);}).sort((a,b)=>new Date(b.checkIn)-new Date(a.checkIn));
+function AT({D,vu,P,ST,isA}) {
+  const [fd,setFd]=useState(tod());
+  const [fu,setFu]=useState("all");
+  const [sel,setSel]=useState(null);
+  const [editId,setEditId]=useState(null);
+  const [ef,setEf]=useState({});
+
+  const recs=D.attendance.filter(a=>{
+    if(fd&&a.date!==fd)return false;
+    if(fu!=="all"&&a.userId!==fu)return false;
+    return vu.some(u=>u.id===a.userId);
+  }).sort((a,b)=>new Date(b.checkIn)-new Date(a.checkIn));
+
   const exp=()=>{
-    const rows=[["Name","Date","In","Out","Hours","Late","Office","WFH","Status"],...recs.map(r=>[r.userName,r.date,fT(r.checkIn),r.checkOut?fT(r.checkOut):"",r.checkOut?wHr(r.checkIn,r.checkOut):"",r.lateBy||0,r.officeName||"",r.isWFH?"Y":"N",r.status])].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
-    const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(rows);a.download=`att_${fd}.csv`;a.click();ST("📊 Exported!");
+    const rows=[["Name","Date","In","Out","Hours","Late","Office","WFH","Status"],
+      ...recs.map(r=>[r.userName,r.date,fT(r.checkIn),r.checkOut?fT(r.checkOut):"",
+        r.checkOut?wHr(r.checkIn,r.checkOut):"",r.lateBy||0,r.officeName||"",r.isWFH?"Y":"N",r.status])
+    ].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
+    const a=document.createElement("a");
+    a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(rows);
+    a.download=`att_${fd}.csv`;a.click();ST("📊 Exported!");
   };
+
+  const saveEdit=()=>{
+    updateAttendance(editId,{
+      status:ef.status,
+      lateBy:parseInt(ef.lateBy)||0,
+      checkIn:ef.checkIn?new Date(`${ef.date}T${ef.checkIn}`).toISOString():undefined,
+      checkOut:ef.checkOut?new Date(`${ef.date}T${ef.checkOut}`).toISOString():null,
+      officeName:ef.officeName,
+    });
+    ST("✅ Attendance updated!");
+    setEditId(null);setSel(null);
+  };
+
   const mk=(uid,status)=>{
     const ex=D.attendance.find(a=>a.userId===uid&&a.date===fd);
     if(ex){updateAttendance(ex.id,{status});}
     else{addAttendance({id:gid(),userId:uid,userName:vu.find(u=>u.id===uid)?.name,date:fd,checkIn:new Date().toISOString(),checkOut:null,officeName:"Manual",status,lateBy:0});}
     ST(`Marked ${status}`);
   };
+
   const sb={present:G.gr,late:G.am,wfh:G.bl,absent:G.rd};
+
   return (
     <>
       <div style={{display:"flex",gap:8,marginBottom:10}}>
         <input type="date" value={fd} onChange={e=>setFd(e.target.value)} style={{...I,flex:1}}/>
-        <select value={fu} onChange={e=>setFu(e.target.value)} style={{...I,flex:1}}><option value="all">All</option>{vu.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}</select>
+        <select value={fu} onChange={e=>setFu(e.target.value)} style={{...I,flex:1}}>
+          <option value="all">All Staff</option>
+          {vu.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+        </select>
       </div>
-      <button onClick={exp} style={{...B(G.bl),width:"100%",marginBottom:10}}>📥 Export CSV/Excel</button>
+      <button onClick={exp} style={{...B(G.bl),width:"100%",marginBottom:10}}>📥 Export CSV</button>
+
       {recs.map(r=>(
-        <div key={r.id} style={{...K,border:sel===r.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===r.id?null:r.id)}>
+        <div key={r.id} style={{...K,border:sel===r.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>{if(editId!==r.id){setSel(sel===r.id?null:r.id);}}}>
           <div style={{display:"flex",gap:10,alignItems:"center"}}>
             {r.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>}
-            <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:13}}>{r.userName}{r.isWFH&&<span style={{marginLeft:5,fontSize:11,color:G.bl}}>🏠</span>}</div><div style={{color:G.mut,fontSize:12}}>In:{fT(r.checkIn)}{r.checkOut?` Out:${fT(r.checkOut)} ${wHr(r.checkIn,r.checkOut)}`:""}</div><div style={{color:G.dim,fontSize:11}}>{r.officeName}{r.lateBy>0?` ⚠️${r.lateBy}m`:""}</div></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:13}}>{r.userName}{r.isWFH&&<span style={{marginLeft:5,fontSize:11,color:G.bl}}>🏠</span>}</div>
+              <div style={{color:G.mut,fontSize:12}}>In:{fT(r.checkIn)}{r.checkOut?` Out:${fT(r.checkOut)} ${wHr(r.checkIn,r.checkOut)}`:""}</div>
+              <div style={{color:G.dim,fontSize:11}}>{r.officeName}{r.lateBy>0?` ⚠️${r.lateBy}m`:""}</div>
+            </div>
             <Chip bg={sb[r.status]||G.dim} label={r.status} sm/>
           </div>
-          {sel===r.id&&(
+
+          {sel===r.id&&editId!==r.id&&(
             <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
                 {[["Date",fD(r.date)],["In",fT(r.checkIn)],["Out",r.checkOut?fT(r.checkOut):"—"],["Hours",r.checkOut?wHr(r.checkIn,r.checkOut):"—"],["Late",r.lateBy>0?`${r.lateBy}m`:"✓"],["Office",r.officeName||"Manual"]].map(([lb,v])=>(
-                  <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}><div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div><div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div></div>
+                  <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}>
+                    <div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div>
+                    <div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div>
+                  </div>
                 ))}
               </div>
-              {r.gps&&<a href={`https://maps.google.com/?q=${r.gps.lat},${r.gps.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"7px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none"}}>🗺 Check-in GPS Maps</a>}
-              {r.selfie&&<div style={{marginTop:8,textAlign:"center"}}><img src={r.selfie} style={{width:100,height:100,borderRadius:10,objectFit:"cover",border:`2px solid ${G.gold}`}}/></div>}
+              {r.gps&&<a href={`https://maps.google.com/?q=${r.gps.lat},${r.gps.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"7px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none",marginBottom:8}}>🗺 View GPS Location</a>}
+              {r.selfie&&<div style={{textAlign:"center",marginBottom:8}}><img src={r.selfie} style={{width:80,height:80,borderRadius:10,objectFit:"cover",border:`2px solid ${G.gold}`}}/></div>}
+              {isA&&<button onClick={(e)=>{e.stopPropagation();setEditId(r.id);setEf({status:r.status,lateBy:r.lateBy||0,checkIn:r.checkIn?fT(r.checkIn):"",checkOut:r.checkOut?fT(r.checkOut):"",officeName:r.officeName||"",date:r.date});}} style={{...B(G.bl),width:"100%",fontSize:12,fontWeight:700}}>✏️ Edit This Record</button>}
+            </div>
+          )}
+
+          {editId===r.id&&(
+            <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}} onClick={e=>e.stopPropagation()}>
+              <div style={{color:G.gold,fontWeight:700,marginBottom:10}}>✏️ Edit Attendance — {r.userName}</div>
+              <FRow label="Status">
+                <select style={I} value={ef.status} onChange={e=>setEf({...ef,status:e.target.value})}>
+                  <option value="present">Present</option>
+                  <option value="late">Late</option>
+                  <option value="wfh">WFH</option>
+                  <option value="absent">Absent</option>
+                </select>
+              </FRow>
+              <div style={{display:"flex",gap:8}}>
+                <FRow label="Check In Time"><input type="time" style={I} value={ef.checkIn} onChange={e=>setEf({...ef,checkIn:e.target.value})}/></FRow>
+                <FRow label="Check Out Time"><input type="time" style={I} value={ef.checkOut} onChange={e=>setEf({...ef,checkOut:e.target.value})}/></FRow>
+              </div>
+              <FRow label="Late By (mins)"><input type="number" style={I} value={ef.lateBy} onChange={e=>setEf({...ef,lateBy:e.target.value})}/></FRow>
+              <FRow label="Office"><input style={I} value={ef.officeName} onChange={e=>setEf({...ef,officeName:e.target.value})}/></FRow>
+              <div style={{display:"flex",gap:8,marginTop:4}}>
+                <button onClick={saveEdit} style={{...B(G.gr),flex:2,fontWeight:800}}>💾 Save</button>
+                <button onClick={(e)=>{e.stopPropagation();setEditId(null);}} style={{...B(G.dim),flex:1}}>Cancel</button>
+              </div>
             </div>
           )}
         </div>
       ))}
-      <div style={K}>
-        <div style={{fontWeight:700,marginBottom:8,fontSize:12}}>Manual Override — {fd}</div>
-        {vu.filter(u=>!recs.some(r=>r.userId===u.id)).map(u=>(
-          <div key={u.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:`1px solid ${G.bdr}`}}>
-            <span style={{fontSize:13}}>{u.name}</span>
-            <div style={{display:"flex",gap:5}}>{[["P","present",G.gr],["L","late",G.am],["W","wfh",G.bl],["A","absent",G.rd]].map(([lb,st,c])=><button key={lb} onClick={()=>mk(u.id,st)} style={{...B(c),fontSize:11,padding:"4px 9px"}}>{lb}</button>)}</div>
-          </div>
-        ))}
-        {vu.every(u=>recs.some(r=>r.userId===u.id))&&<div style={{color:G.dim,fontSize:12}}>All accounted for.</div>}
-      </div>
+
+      {isA&&(
+        <div style={K}>
+          <div style={{fontWeight:700,marginBottom:8,fontSize:12,color:G.gold}}>Manual Override — {fd}</div>
+          {vu.filter(u=>!recs.some(r=>r.userId===u.id)).map(u=>(
+            <div key={u.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:`1px solid ${G.bdr}`}}>
+              <span style={{fontSize:13}}>{u.name}</span>
+              <div style={{display:"flex",gap:5}}>
+                {[["P","present",G.gr],["L","late",G.am],["W","wfh",G.bl],["A","absent",G.rd]].map(([lb,st,c])=>(
+                  <button key={lb} onClick={()=>mk(u.id,st)} style={{...B(c),fontSize:11,padding:"4px 9px"}}>{lb}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {vu.every(u=>recs.some(r=>r.userId===u.id))&&<div style={{color:G.dim,fontSize:12}}>All staff accounted for.</div>}
+        </div>
+      )}
     </>
   );
 }
@@ -958,13 +1090,13 @@ function RT({D,vu,P,ST,AN}) {
   );
 }
 
-function PT({D,vu,ST}) {
+function PT({D,vu,ST,user}) {
   const n=new Date(),[yr,setYr]=useState(n.getFullYear()),[mo,setMo]=useState(n.getMonth()+1);
   const ms=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const polAll=D.leavePolicy||{employee:DP_EMP,articled:DP_AA};
-  const pol=polAll[user.employeeType||"employee"]||DP_EMP;
   const rows=vu.map(u=>{
     const s=`${yr}-${String(mo).padStart(2,"0")}-01`,e=`${yr}-${String(mo).padStart(2,"0")}-${String(new Date(yr,mo,0).getDate()).padStart(2,"0")}`,wd=wDM(yr,mo);
+    const pol=(polAll[u.employeeType||"employee"]||DP_EMP);
     const ar=D.attendance.filter(a=>a.userId===u.id&&a.date>=s&&a.date<=e);
     const ap=(D.leaves||[]).filter(l=>l.userId===u.id&&l.status==="approved"&&l.from>=s&&l.from<=e);
     const pr=ar.filter(r=>r.status==="present").length,lt=ar.filter(r=>r.status==="late").length,wf=ar.filter(r=>r.isWFH).length;
