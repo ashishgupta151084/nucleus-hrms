@@ -226,9 +226,12 @@ export default function App() {
         if(cfg.users.some(u=>u.role==="admin"&&u.email!=="ag@nucleusadvisors.in")){
           setConfig(clean({...cfg,users})).catch(()=>{});
         }
+      } else if(cfg&&(!cfg.users||cfg.users.length===0)){
+        // Config exists but users is empty - DO NOT overwrite, just load what we have
+        setD(prev=>({...prev,...cfg,users:prev.users||SEED.users,loaded:true}));
       } else {
-        // Only write SEED data if Firestore is completely empty (first run)
-        setConfig({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,branches:[],leavePolicy:SEED.leavePolicy,holidays:SEED.holidays}).catch(()=>{});
+        // Truly empty Firestore - write SEED only on first run
+        setConfig(clean({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,branches:[],leavePolicy:SEED.leavePolicy,holidays:SEED.holidays})).catch(()=>{});
       }
     });
     return unsub;
@@ -1568,70 +1571,10 @@ function ORG({D,vu}) {
   );
 }
 
-function Register({D,P,ST,setSc}) {
-  const [step,setStep]=useState("form");
-  const [f,setF]=useState({firmName:"",ownerName:"",email:"",mobile:"",password:"",city:"",plan:"trial"});
-  const submit=async()=>{
-    if(!f.firmName||!f.email||!f.mobile||!f.password)return ST("All fields required","error");
-    if(f.password.length<6)return ST("Password must be at least 6 characters","error");
-    // Create new firm config in Firebase under firms/{firmId}
-    const firmId="firm_"+Date.now();
-    const trialEnd=new Date(Date.now()+30*24*60*60*1000).toISOString();
-    const adminUser={id:"u1",name:f.ownerName||f.firmName,email:f.email,password:f.password,role:"admin",mobile:f.mobile,teamId:null,officeIds:[],customShift:null,managedTeams:[],weeklyOff:"sun_sat",employeeType:"employee"};
-    const newFirm={
-      companyName:f.firmName,city:f.city,ownerEmail:f.email,ownerMobile:f.mobile,
-      firmId,firmPlan:"trial",firmTrial:trialEnd,firmRegistered:new Date().toISOString(),
-      users:[adminUser],offices:[],teams:[],branches:[],
-      leavePolicy:{employee:DP_EMP,articled:DP_AA},
-      holidays:[{id:"h1",date:"2026-01-26",name:"Republic Day"},{id:"h2",date:"2026-08-15",name:"Independence Day"},{id:"h3",date:"2026-10-02",name:"Gandhi Jayanti"},{id:"h4",date:"2026-11-08",name:"Diwali"},{id:"h5",date:"2026-12-25",name:"Christmas"}],
-    };
-    // Save to Firebase
-    try{
-      const {setConfig}=await import("./firebase");
-      await setConfig(newFirm);
-      P({...D,...newFirm});
-      setStep("success");
-    }catch(e){ST("Registration failed. Please try again.","error");}
-  };
-  if(step==="success") return (
-    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{maxWidth:400,width:"100%"}}>
-        <div style={{...K,textAlign:"center",padding:32}}>
-          <div style={{fontSize:48,marginBottom:12}}>🎉</div>
-          <div style={{fontWeight:800,fontSize:20,color:G.gold,marginBottom:8}}>Welcome to Nucleus HRMS!</div>
-          <div style={{fontSize:13,color:G.mut,marginBottom:4}}>Your 30-day free trial has started.</div>
-          <div style={{fontSize:12,color:G.dim,marginBottom:20}}>Login with your email and password to get started.</div>
-          <button onClick={()=>setSc("login")} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Go to Login →</button>
-        </div>
-      </div>
-    </div>
-  );
-  return (
-    <div style={{minHeight:"100vh",background:G.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{maxWidth:420,width:"100%"}}>
-        <div style={{textAlign:"center",marginBottom:20}}>
-          <div style={{fontSize:22,fontWeight:900,color:G.gold}}>Nucleus HRMS</div>
-          <div style={{fontSize:13,color:G.mut,marginTop:4}}>Register Your CA Firm — 30 Days Free</div>
-        </div>
-        <div style={K}>
-          <FRow label="CA Firm Name"><input style={I} value={f.firmName} onChange={e=>setF({...f,firmName:e.target.value})} placeholder="e.g. Sharma & Associates"/></FRow>
-          <FRow label="Owner / Partner Name"><input style={I} value={f.ownerName} onChange={e=>setF({...f,ownerName:e.target.value})} placeholder="CA Ashish Gupta"/></FRow>
-          <FRow label="Email"><input style={I} type="email" value={f.email} onChange={e=>setF({...f,email:e.target.value})} placeholder="ca@yourfirm.com"/></FRow>
-          <FRow label="Mobile"><input style={I} type="tel" value={f.mobile} onChange={e=>setF({...f,mobile:e.target.value})} placeholder="10-digit mobile" maxLength={10}/></FRow>
-          <FRow label="City"><input style={I} value={f.city} onChange={e=>setF({...f,city:e.target.value})} placeholder="e.g. Jaipur"/></FRow>
-          <FRow label="Set Password"><input style={I} type="password" value={f.password} onChange={e=>setF({...f,password:e.target.value})} placeholder="Min 6 characters"/></FRow>
-          <div style={{background:G.navy,borderRadius:10,padding:12,marginBottom:12}}>
-            <div style={{color:G.gold,fontWeight:700,fontSize:13,marginBottom:6}}>🎁 Free Trial Includes:</div>
-            {["30 days free access","Up to 10 staff members","GPS attendance tracking","Leave management","Payroll reports"].map(f2=>(
-              <div key={f2} style={{fontSize:12,color:G.mut,marginBottom:3}}>✓ {f2}</div>
-            ))}
-          </div>
-          <button onClick={submit} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800,fontSize:15}}>Start Free Trial →</button>
-          <div style={{textAlign:"center",marginTop:10}}><span onClick={()=>setSc("login")} style={{fontSize:12,color:G.bl,cursor:"pointer"}}>Already registered? Sign In</span></div>
-        </div>
-      </div>
-    </div>
-  );
+function Register({setSc}) {
+  // PERMANENTLY DISABLED - prevents Firebase data overwrite
+  useEffect(()=>{setSc("login");},[]);
+  return null;
 }
 
 function SuperAdmin({D,P,ST,setSc,logout}) {
