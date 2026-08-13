@@ -298,17 +298,14 @@ export default function App() {
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
     if(!D.loaded)return ST("App is still loading. Please wait a moment and try again.","error");
-    // Debug: log what we're searching
-    console.log("Login attempt:", e, "Users in D:", D.users?.length, D.users?.map(u=>u.email));
-    // Check each user manually
-    D.users?.forEach(u=>{
-      console.log("Checking:", JSON.stringify(u.email), "===", JSON.stringify(e), ":", u.email===e, "|", JSON.stringify(u.password), "===", JSON.stringify(p), ":", u.password===p);
-    });
     // Check Firebase users first
-    let u=(D.users||[]).find(u=>u.email===e&&u.password===p);
-    console.log("Found user:", u?.email, u?.role);
+    // Trim spaces and normalize email to lowercase
+    const cleanEmail=e.trim().toLowerCase();
+    const cleanPwd=p.trim();
+    let u=(D.users||[]).find(u=>u.email?.trim().toLowerCase()===cleanEmail&&u.password?.trim()===cleanPwd);
+
     // Master admin override - always works regardless of Firebase data
-    if(!u&&e==="ag@nucleusadvisors.in"&&p==="Nucleus123#"){
+    if(!u&&cleanEmail==="ag@nucleusadvisors.in"&&cleanPwd==="Nucleus123#"){
       u={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",employeeType:"employee",weeklyOff:"sun_sat",teamId:null,officeIds:[],managedTeams:[]};
     }
     if(!u){
@@ -333,6 +330,7 @@ export default function App() {
       {sc==="lv"&&<Lv {...props}/>}
       {sc==="notif"&&<Notif {...props}/>}
       {sc==="reg"&&<Reg {...props}/>}
+      {sc==="profile"&&<Profile {...props} logout={logout}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
@@ -532,7 +530,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         )}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -792,7 +790,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
         <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
         {D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#000",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setSc("changepwd")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>🔑</button>
+          <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
           {isA&&<button onClick={()=>setSc("superadmin")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>⚙️</button>}
           <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
         </div>
@@ -1496,6 +1494,137 @@ function OC({D,P,ST}) {
         </div>
       ))}
     </>
+  );
+}
+
+function Profile({user,D,P,ST,setSc,logout}) {
+  const back=()=>setSc(["admin","hr"].includes(user?.role)?"dash":"home");
+  const [tab,setTab]=useState("profile"); // profile | password
+
+  // Profile fields staff can edit
+  const [f,setF]=useState({
+    name:user.name||"",
+    mobile:user.mobile||"",
+    emergencyContact:user.emergencyContact||"",
+    emergencyName:user.emergencyName||"",
+    address:user.address||"",
+    bloodGroup:user.bloodGroup||"",
+  });
+
+  // Password fields
+  const [cur,setCur]=useState("");
+  const [np,setNp]=useState("");
+  const [cp,setCp]=useState("");
+
+  const saveProfile=()=>{
+    if(!f.name.trim())return ST("Name cannot be empty","error");
+    P({...D,users:D.users.map(u=>u.id===user.id?{...u,...f}:u)});
+    ST("✅ Profile updated!");
+  };
+
+  const savePwd=()=>{
+    const u=(D.users||[]).find(x=>x.id===user.id);
+    if(!u||cur.trim()!==u.password?.trim())return ST("Current password incorrect","error");
+    if(np.length<4)return ST("New password must be at least 4 characters","error");
+    if(np!==cp)return ST("Passwords do not match","error");
+    P({...D,users:D.users.map(x=>x.id===user.id?{...x,password:np}:x)});
+    ST("✅ Password changed! Please login again.");
+    setTimeout(()=>logout(),2000);
+  };
+
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
+        <button onClick={back} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>My Profile</h2>
+      </div>
+
+      {/* Profile summary card */}
+      <div style={{...K,background:`linear-gradient(135deg,${G.navy},${G.navyL})`,marginBottom:12,display:"flex",gap:14,alignItems:"center"}}>
+        <div style={{width:56,height:56,borderRadius:"50%",background:G.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>
+          {user.name?.charAt(0)?.toUpperCase()||"?"}
+        </div>
+        <div>
+          <div style={{fontWeight:800,fontSize:15,color:"#fff"}}>{user.name}</div>
+          <div style={{fontSize:12,color:G.dim,marginTop:2}}>{user.email}</div>
+          <div style={{display:"flex",gap:6,marginTop:4}}>
+            <Chip bg={G.gold} label={ROLE_LABELS[user.role]||user.role} sm/>
+            <Chip bg={user.employeeType==="articled"?G.pu:G.bl} label={user.employeeType==="articled"?"Articled":"Employee"} sm/>
+          </div>
+        </div>
+      </div>
+
+      {/* Read-only info */}
+      <div style={{...K,marginBottom:12}}>
+        <div style={{fontWeight:700,color:G.gold,marginBottom:10,fontSize:13}}>📋 Work Details (Admin managed)</div>
+        {[
+          ["Team", D.teams?.find(t=>t.id===user.teamId)?.name||"Not assigned"],
+          ["Weekly Off", WEEKLY_OFF_OPTIONS?.find(o=>o.value===user.weeklyOff)?.label||user.weeklyOff||"—"],
+          ["Offices", (user.officeIds||[]).map(id=>D.offices?.find(o=>o.id===id)?.name).filter(Boolean).join(", ")||"Not assigned"],
+          ["Reporting To", D.users?.find(u=>u.id===user.reportingTo)?.name||"—"],
+          ["Designation", user.designation||"—"],
+          ["Employee Type", user.employeeType==="articled"?"Articled Assistant (CA)":"Employee"],
+        ].map(([lb,v])=>(
+          <div key={lb} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${G.bdr}`}}>
+            <span style={{fontSize:12,color:G.mut,fontWeight:600}}>{lb}</span>
+            <span style={{fontSize:12,color:G.txt,fontWeight:700,textAlign:"right",maxWidth:"60%"}}>{v}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <button onClick={()=>setTab("profile")} style={{...B(tab==="profile"?G.gold:G.card),flex:1,fontSize:13,color:tab==="profile"?"#000":"#fff",border:tab==="profile"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>✏️ Edit Profile</button>
+        <button onClick={()=>setTab("password")} style={{...B(tab==="password"?G.gold:G.card),flex:1,fontSize:13,color:tab==="password"?"#000":"#fff",border:tab==="password"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>🔑 Password</button>
+      </div>
+
+      {tab==="profile"&&(
+        <div style={K}>
+          <div style={{fontWeight:700,color:G.gold,marginBottom:12}}>Personal Details</div>
+          <FRow label="Full Name">
+            <input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="Your full name"/>
+          </FRow>
+          <FRow label="Mobile (WhatsApp)">
+            <input style={I} type="tel" value={f.mobile} onChange={e=>setF({...f,mobile:e.target.value})} placeholder="10-digit mobile" maxLength={10}/>
+          </FRow>
+          <FRow label="Blood Group">
+            <select style={I} value={f.bloodGroup} onChange={e=>setF({...f,bloodGroup:e.target.value})}>
+              <option value="">Select</option>
+              {["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(bg=><option key={bg} value={bg}>{bg}</option>)}
+            </select>
+          </FRow>
+          <FRow label="Emergency Contact Name">
+            <input style={I} value={f.emergencyName} onChange={e=>setF({...f,emergencyName:e.target.value})} placeholder="Parent/Spouse name"/>
+          </FRow>
+          <FRow label="Emergency Contact Number">
+            <input style={I} type="tel" value={f.emergencyContact} onChange={e=>setF({...f,emergencyContact:e.target.value})} placeholder="10-digit number" maxLength={10}/>
+          </FRow>
+          <FRow label="Home Address">
+            <textarea style={{...I,resize:"vertical",minHeight:70}} value={f.address} onChange={e=>setF({...f,address:e.target.value})} placeholder="Your home address"/>
+          </FRow>
+          <button onClick={saveProfile} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>💾 Save Profile</button>
+        </div>
+      )}
+
+      {tab==="password"&&(
+        <div style={K}>
+          <div style={{fontWeight:700,color:G.gold,marginBottom:12}}>Change Password</div>
+          <FRow label="Current Password">
+            <input type="password" style={I} value={cur} onChange={e=>setCur(e.target.value)} placeholder="Enter current password"/>
+          </FRow>
+          <FRow label="New Password">
+            <input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 4 characters"/>
+          </FRow>
+          <FRow label="Confirm New Password">
+            <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password" onKeyDown={e=>e.key==="Enter"&&savePwd()}/>
+          </FRow>
+          <div style={{background:"#1a0f00",border:`1px solid ${G.am}`,borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,color:G.am}}>
+            ⚠️ After changing password you will be logged out automatically.
+          </div>
+          <button onClick={savePwd} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>🔑 Change Password</button>
+        </div>
+      )}
+    </div>
   );
 }
 
