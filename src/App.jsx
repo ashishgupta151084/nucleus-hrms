@@ -221,7 +221,8 @@ export default function App() {
       if(cfg&&cfg.users&&cfg.users.length>0){
         setD(prev=>({...prev,...cfg,loaded:true}));
       } else {
-        setConfig({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,leavePolicy:SEED.leavePolicy,holidays:SEED.holidays}).catch(()=>{});
+        // Only write SEED data if Firestore is completely empty (first run)
+        setConfig({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,branches:[],leavePolicy:SEED.leavePolicy,holidays:SEED.holidays}).catch(()=>{});
       }
     });
     return unsub;
@@ -251,6 +252,11 @@ export default function App() {
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
   const P=useCallback(nd=>{
     setD(nd);
+    // Safety: never write empty users array to Firebase
+    if(!nd.users||nd.users.length===0){
+      console.warn("P() called with empty users - skipping Firebase write");
+      return;
+    }
     setConfig(clean({
       users:nd.users,
       offices:nd.offices,
@@ -314,9 +320,7 @@ function Login({login,name,setSc,D}) {
           {!D?.loaded&&<div style={{textAlign:"center",marginBottom:8,fontSize:12,color:G.am}}>⏳ Connecting to server… please wait</div>}
           <button onClick={()=>login(e,p)} style={{...B(!D?.loaded?"#555":`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:D?.loaded?"#000":"#888",fontWeight:800}}>{D?.loaded?"Sign In →":"⏳ Loading…"}</button>
         </div>
-        <div style={{textAlign:"center",marginTop:12}}>
-          <span onClick={()=>setSc("register")} style={{fontSize:12,color:G.bl,cursor:"pointer",textDecoration:"underline"}}>New CA Firm? Register Free Trial →</span>
-        </div>
+
         <div style={{textAlign:"center",marginTop:8}}>
           <div style={{fontSize:11,color:G.dim}}>Developed by <span style={{color:G.mut,fontWeight:700}}>Ashish Gupta</span></div>
           <div style={{fontSize:10,color:G.dim,marginTop:3}}>© {new Date().getFullYear()} Nucleus Advisors</div>
