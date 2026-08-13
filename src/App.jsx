@@ -300,6 +300,10 @@ export default function App() {
     if(!D.loaded)return ST("App is still loading. Please wait a moment and try again.","error");
     // Debug: log what we're searching
     console.log("Login attempt:", e, "Users in D:", D.users?.length, D.users?.map(u=>u.email));
+    // Check each user manually
+    D.users?.forEach(u=>{
+      console.log("Checking:", JSON.stringify(u.email), "===", JSON.stringify(e), ":", u.email===e, "|", JSON.stringify(u.password), "===", JSON.stringify(p), ":", u.password===p);
+    });
     // Check Firebase users first
     let u=(D.users||[]).find(u=>u.email===e&&u.password===p);
     console.log("Found user:", u?.email, u?.role);
