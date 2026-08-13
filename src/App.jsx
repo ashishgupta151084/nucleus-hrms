@@ -11,6 +11,16 @@ import {
 // Strip undefined values before saving to Firestore
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
+// ── Auto-backup before every config save ─────────────────────────
+const saveBackup = async (data) => {
+  try {
+    const {db} = await import("./firebase");
+    const {doc,setDoc} = await import("firebase/firestore");
+    const key = "backup_"+new Date().toISOString().slice(0,19).replace(/[:.T]/g,"-");
+    await setDoc(doc(db,"backups",key), {...data, backedUpAt:new Date().toISOString()});
+  } catch(e) { console.warn("Backup failed:", e.message); }
+};
+
 // ── MSG91 WhatsApp Notifications ─────────────────────────────────
 // Sign up at msg91.com, get your AUTH_KEY and create templates
 const MSG91_AUTH = "YOUR_MSG91_AUTH_KEY"; // Replace with your MSG91 auth key
@@ -266,7 +276,7 @@ export default function App() {
       console.warn("P() called with empty users - skipping Firebase write");
       return;
     }
-    setConfig(clean({
+    const configData=clean({
       users:nd.users,
       offices:nd.offices,
       teams:nd.teams,
@@ -277,7 +287,10 @@ export default function App() {
       firmId:nd.firmId||null,
       firmPlan:nd.firmPlan||null,
       firmTrial:nd.firmTrial||null,
-    }));
+    });
+    // Save backup before writing
+    saveBackup(configData).catch(()=>{});
+    setConfig(configData);
   },[]);
   const AN=useCallback((uid,msg,type="info")=>{
     addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
@@ -285,13 +298,23 @@ export default function App() {
   useEffect(()=>{if(cu)setSc(["admin","hr"].includes(cu.role)?"dash":"home");else setSc("login");},[cu]);
   const login=(e,p)=>{
     if(!D.loaded)return ST("App is still loading. Please wait a moment and try again.","error");
+    // Debug: log what we're searching
+    console.log("Login attempt:", e, "Users in D:", D.users?.length, D.users?.map(u=>u.email));
     // Check Firebase users first
     let u=(D.users||[]).find(u=>u.email===e&&u.password===p);
+    console.log("Found user:", u?.email, u?.role);
     // Master admin override - always works regardless of Firebase data
     if(!u&&e==="ag@nucleusadvisors.in"&&p==="Nucleus123#"){
       u={id:"u1",name:"Ashish Gupta",email:"ag@nucleusadvisors.in",password:"Nucleus123#",role:"admin",employeeType:"employee",weeklyOff:"sun_sat",teamId:null,officeIds:[],managedTeams:[]};
     }
-    if(!u)return ST("Invalid credentials. Please check your email and password.","error");
+    if(!u){
+      // Check if this might be a staff member whose data was lost
+      const isKnownDomain=e.includes("@nucleusadvisors.in");
+      if(isKnownDomain){
+        return ST("Staff data needs to be re-entered by admin. Contact Ashish Gupta.","error");
+      }
+      return ST("Invalid credentials. Please check your email and password.","error");
+    }
     setCu(u);sv("nau5",u);
   };
   const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
