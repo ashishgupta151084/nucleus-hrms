@@ -375,6 +375,27 @@ function Login({login,name,setSc,D}) {
   );
 }
 
+function LiveTimer({checkIn, checkOut}) {
+  const [now,setNow]=useState(new Date());
+  useEffect(()=>{
+    if(checkOut)return;
+    const t=setInterval(()=>setNow(new Date()),60000);
+    return()=>clearInterval(t);
+  },[checkOut]);
+  const start=new Date(checkIn);
+  const end=checkOut?new Date(checkOut):now;
+  const mins=Math.max(0,Math.round((end-start)/60000));
+  const hrs=Math.floor(mins/60);
+  const m=mins%60;
+  const display=hrs>0?`${hrs}h ${m}m`:`${m}m`;
+  return (
+    <div style={{marginTop:4,fontSize:12,color:checkOut?G.gold:G.gr,fontWeight:700}}>
+      ⏱ {checkOut?"Total: ":"Working: "}{display}
+    </div>
+  );
+}
+
+
 function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
@@ -455,6 +476,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     startGpsFlow();
   };
   const doIn=()=>{
+    // If there's already a checked-out record today, create new record for re-checkin
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
     addAttendance({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
     ST(wfh?"🏠 WFH done!":lb>30?`⚠️ ${lb}m late`:"✅ Checked in!");setStep("done");
@@ -489,7 +511,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         {sh&&<div style={{marginTop:8,background:"rgba(201,168,76,.15)",border:`1px solid ${G.gold}44`,borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:G.gold}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
       <div style={K}>
-        {!rec?(
+        {(!rec||(rec&&rec.checkOut))?(
           <>
             {step==="idle"&&(
               <>
@@ -523,9 +545,26 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           <div>
             <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
               {rec.selfie?<img src={rec.selfie} style={{width:60,height:60,borderRadius:"50%",objectFit:"cover",border:`3px solid ${G.gold}`,flexShrink:0}}/>:<div style={{width:60,height:60,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,flexShrink:0}}>👤</div>}
-              <div><div style={{color:G.gr,fontWeight:800,fontSize:15}}>✅ {rec.isWFH?"WFH":"Checked In"}</div><div style={{color:G.mut,fontSize:13}}>at {fT(rec.checkIn)} · {rec.officeName}</div>{rec.lateBy>0&&<div style={{color:G.am,fontSize:12}}>⚠️ {rec.lateBy} mins late</div>}</div>
+              <div style={{flex:1}}>
+                <div style={{color:G.gr,fontWeight:800,fontSize:15}}>✅ {rec.isWFH?"WFH":"Checked In"}</div>
+                <div style={{color:G.mut,fontSize:13}}>at {fT(rec.checkIn)} · {rec.officeName}</div>
+                {rec.lateBy>0&&<div style={{color:G.am,fontSize:12}}>⚠️ {rec.lateBy} mins late</div>}
+                {/* Live working hours timer */}
+                <LiveTimer checkIn={rec.checkIn} checkOut={rec.checkOut}/>
+              </div>
             </div>
-            {rec.checkOut?<div style={{background:G.card2,borderRadius:10,padding:10,textAlign:"center",color:G.mut,fontSize:13,border:`1px solid ${G.bdr}`}}>Out {fT(rec.checkOut)} · <span style={{color:G.gold,fontWeight:700}}>{wHr(rec.checkIn,rec.checkOut)}</span> 👋</div>:<button onClick={doOut} style={{...B(G.am),width:"100%",fontWeight:700}}>🚪 Check Out</button>}
+            {rec.checkOut?(
+              <>
+                <div style={{background:G.card2,borderRadius:10,padding:10,textAlign:"center",border:`1px solid ${G.bdr}`,marginBottom:8}}>
+                  <div style={{color:G.mut,fontSize:12}}>Checked Out at {fT(rec.checkOut)}</div>
+                  <div style={{color:G.gold,fontWeight:800,fontSize:18,marginTop:2}}>{wHr(rec.checkIn,rec.checkOut)} worked 👋</div>
+                </div>
+                {/* Allow re-checkin after checkout */}
+                <button onClick={()=>{setStep("idle");}} style={{...B(G.bl),width:"100%",fontWeight:700,fontSize:13}}>🔄 Check In Again</button>
+              </>
+            ):(
+              <button onClick={doOut} style={{...B(G.am),width:"100%",fontWeight:700}}>🚪 Check Out</button>
+            )}
           </div>
         )}
       </div>
@@ -826,10 +865,22 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
 
 function OV({D,vu}) {
   const tr=D.attendance.filter(a=>a.date===tod());
-  const ci=tr.filter(a=>vu.some(u=>u.id===a.userId)).length;
-  const wC=tr.filter(a=>a.isWFH&&vu.some(u=>u.id===a.userId)).length;
-  const tot=vu.length,ab=tot-ci,pct=tot?Math.round((ci/tot)*100):0;
-  const lt=tr.filter(r=>r.status==="late"&&vu.some(u=>u.id===r.userId)).length;
+  // Get LATEST record per user (in case of duplicates)
+  const userLatest={};
+  tr.forEach(a=>{
+    if(vu.some(u=>u.id===a.userId)){
+      if(!userLatest[a.userId]||new Date(a.checkIn)>new Date(userLatest[a.userId].checkIn)){
+        userLatest[a.userId]=a;
+      }
+    }
+  });
+  const uniqueRecs=Object.values(userLatest);
+  const ci=uniqueRecs.length;
+  const wC=uniqueRecs.filter(a=>a.isWFH).length;
+  const tot=vu.length;
+  const ab=Math.max(0,tot-ci);
+  const pct=tot?Math.round((ci/tot)*100):0;
+  const lt=uniqueRecs.filter(r=>r.status==="late").length;
   const lN=vu.filter(u=>D.liveLocations?.[u.id]).length;
   const sb={present:G.gr,late:G.am,wfh:G.bl};
   return (
@@ -846,7 +897,7 @@ function OV({D,vu}) {
       </div>
       <div style={K}>
         <div style={{fontWeight:700,marginBottom:8,color:G.gold}}>Today</div>
-        {vu.map(u=>{const r=tr.find(a=>a.userId===u.id),lv=D.liveLocations?.[u.id];return(
+        {vu.map(u=>{const r=userLatest[u.id],lv=D.liveLocations?.[u.id];return(
           <div key={u.id} style={{display:"flex",gap:8,alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${G.bdr}`}}>
             {r?.selfie?<img src={r.selfie} style={{width:34,height:34,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>👤</div>}
             <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700}}>{u.name}{lv&&<span style={{marginLeft:5,width:6,height:6,background:G.gr,borderRadius:"50%",display:"inline-block",animation:"pulse 2s infinite"}}/>}</div><div style={{fontSize:11,color:G.dim}}>{r?`In:${fT(r.checkIn)}${r.checkOut?` Out:${fT(r.checkOut)}`:""}${r.lateBy>0?` ⚠️${r.lateBy}m`:""}${r.isWFH?" 🏠":""}` : "Absent"}</div></div>
