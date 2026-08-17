@@ -1,4 +1,4 @@
-name: Deploy Nucleus HRMS
+name: Deploy Nucleus HRMS to Firebase
 
 on:
   push:

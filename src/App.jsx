@@ -2186,4 +2186,4 @@ function RST({D,P,ST,logout}) {
       {step==="confirm_users"&&(<div style={{...K,border:`1px solid ${G.pu}`}}><button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button><FRow label="Type: RESET USERS"><input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET USERS"/></FRow><button onClick={resetUsers} style={{...B(G.pu),width:"100%",fontWeight:800}}>Confirm</button></div>)}
     </div>
   );
-}  
+}
