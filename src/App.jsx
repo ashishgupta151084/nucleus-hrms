@@ -6,7 +6,9 @@ import {
   addReg, updateReg, onRegs,
   updateLiveLocation, onLiveLocations,
   addNotification, updateNotification, onNotifications,
-  saveBackup, getBackups, restoreBackup
+  saveBackup, getBackups, restoreBackup,
+  addCompOff, updateCompOff, onCompOffs,
+  addWorkApproval, updateWorkApproval, onWorkApprovals
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
@@ -149,8 +151,26 @@ const isDayOff=(ds,hs,weeklyOff)=>isWE(ds,weeklyOff)||isHL(ds,hs);
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
-const DP_EMP={casual:12,sick:12,compoff:6,halfday:24,early:12};
-const DP_AA={sick:12,casual:0,compoff:0,halfday:0,early:0,studyleave:12};
+const DP_EMP={
+  casual:12,sick:12,compoff:6,halfday:24,early:12,studyleave:0,
+  maxCompOffPerMonth:2,       // max comp offs allowed per month
+  lateAllowed:3,              // late comings allowed per month
+  earlyAllowed:3,             // early leavings allowed per month
+  lateThresholdMins:30,       // mins beyond shift start = late
+  earlyThresholdMins:30,      // mins before shift end = early leaving
+  lopDeadlineDay:31,          // regularize by this day or LOP
+  lopUrgentDays:2,            // last N days of month = 2-day approval
+};
+const DP_AA={
+  sick:12,casual:0,compoff:0,halfday:0,early:0,studyleave:12,
+  maxCompOffPerMonth:1,
+  lateAllowed:3,
+  earlyAllowed:3,
+  lateThresholdMins:30,
+  earlyThresholdMins:30,
+  lopDeadlineDay:31,
+  lopUrgentDays:2,
+};
 const DP={employee:DP_EMP,articled:DP_AA};
 const GRACE_MINS=15;
 const PLANS={
@@ -259,7 +279,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[],loaded:false});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],compoffs:[],workApprovals:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -293,6 +313,8 @@ export default function App() {
   useEffect(()=>{const u=onAttendance(r=>setD(p=>({...p,attendance:r})));return u;},[]);
   useEffect(()=>{const u=onLeaves(r=>setD(p=>({...p,leaves:r})));return u;},[]);
   useEffect(()=>{const u=onRegs(r=>setD(p=>({...p,regularizations:r})));return u;},[]);
+  useEffect(()=>{const u=onCompOffs(r=>setD(p=>({...p,compoffs:r})));return u;},[]);
+  useEffect(()=>{const u=onWorkApprovals(r=>setD(p=>({...p,workApprovals:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
   useEffect(()=>{
     if(!cu)return;
@@ -378,6 +400,7 @@ export default function App() {
       {sc==="notif"&&<Notif {...props}/>}
       {sc==="reg"&&<Reg {...props}/>}
       {sc==="profile"&&<Profile {...props} logout={logout}/>}
+      {sc==="workapproval"&&<WorkApprovalReq {...props}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
@@ -640,8 +663,27 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           </div>
         )}
       </div>
+      {(()=>{
+        const mon=tod().substr(0,7);
+        const st=getLateEarlyStatus(D,user.id,mon);
+        if(!st.needsReg)return null;
+        const pol=D.leavePolicy?.[(user.employeeType||"employee")]||DP_EMP;
+        return(
+          <div style={{background:st.isUrgent?"#1a0000":"#1a0a00",border:`1px solid ${st.isUrgent?G.rd:G.am}`,borderRadius:12,padding:"10px 14px",marginBottom:10}}>
+            <div style={{color:st.isUrgent?G.rd:G.am,fontWeight:700,fontSize:13}}>
+              {st.isUrgent?"🚨 URGENT — ":"⚠️ "}Regularization Required
+            </div>
+            <div style={{fontSize:12,color:G.dim,marginTop:3}}>
+              {st.lateExceeded&&`Late: ${st.lateCount}/${pol.lateAllowed||3} allowed. `}
+              {st.earlyExceeded&&`Early: ${st.earlyCount}/${pol.earlyAllowed||3} allowed. `}
+              {st.isUrgent?`Approve within 2 days or auto-LOP.`:`Regularize by ${st.deadlineDay}th or becomes LOP.`}
+            </div>
+            <button onClick={()=>setSc("reg")} style={{...B(st.isUrgent?G.rd:G.am),width:"100%",marginTop:8,fontSize:12,fontWeight:700}}>📝 Regularize Now</button>
+          </div>
+        );
+      })()}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workapproval"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -884,7 +926,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
@@ -928,6 +970,8 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="of"&&isA&&<OC {...tp}/>}
       {tab==="org"&&<ORG {...tp}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
+      {tab==="co"&&<CompOffMgmt {...tp}/>}
+      {tab==="co"&&<CompOffMgmt {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
@@ -1309,56 +1353,89 @@ function PT({D,vu,ST,user}) {
 
 function PC({D,P,ST}) {
   const fullPol=D.leavePolicy||DP;
-  const [polEmp,setPolEmp]=useState({...fullPol.employee||DP_EMP});
-  const [polAA,setPolAA]=useState({...fullPol.articled||DP_AA});
+  const [polEmp,setPolEmp]=useState({...DP_EMP,...(fullPol.employee||{})});
+  const [polAA,setPolAA]=useState({...DP_AA,...(fullPol.articled||{})});
   const [etab,setEtab]=useState("employee");
   const pol=etab==="employee"?polEmp:polAA;
   const setPol=etab==="employee"?setPolEmp:setPolAA;
-  const tl={casual:"Casual Leave",sick:"Sick Leave",compoff:"Comp Off",halfday:"Half Day",early:"Early Leaving"};
-  const save=()=>{P({...D,leavePolicy:{employee:polEmp,articled:polAA}});ST("✅ Policy saved!");};
+
+  const updatePol=(key,val)=>setPol(p=>({...p,[key]:Number(val)||0}));
+
+  const save=()=>{
+    P({...D,leavePolicy:{employee:polEmp,articled:polAA}});
+    ST("✅ Policy saved!");
+  };
   const reset=()=>{setPolEmp({...DP_EMP});setPolAA({...DP_AA});P({...D,leavePolicy:DP});ST("Reset!");};
+
+  const LEAVE_KEYS=["casual","sick","compoff","halfday","early","studyleave"];
+  const LATE_KEYS=[
+    ["lateAllowed","Late comings allowed/month"],
+    ["earlyAllowed","Early leavings allowed/month"],
+    ["lateThresholdMins","Late threshold (mins beyond shift start)"],
+    ["earlyThresholdMins","Early leaving threshold (mins before shift end)"],
+    ["lopDeadlineDay","Regularize by day of month (else LOP)"],
+    ["lopUrgentDays","Last N days of month = 2-day urgent approval"],
+  ];
+  const COMPOFF_KEYS=[
+    ["maxCompOffPerMonth","Max comp offs to avail per month"],
+    ["compoff","Annual comp off leave balance (days)"],
+  ];
+
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave Policy Settings</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Set annual leave limits separately for Employees and Articled Assistants.</div></div>
       <div style={{display:"flex",gap:8,marginBottom:12}}>
-        <button onClick={()=>setEtab("employee")} style={{...B(etab==="employee"?G.gold:G.card),flex:1,fontSize:13,color:etab==="employee"?"#000":"#fff",border:etab==="employee"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Employee</button>
-        <button onClick={()=>setEtab("articled")} style={{...B(etab==="articled"?G.gold:G.card),flex:1,fontSize:13,color:etab==="articled"?"#000":"#fff",border:etab==="articled"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Articled Assistant</button>
-      </div>
-      <div style={K}>
-        <div style={{fontWeight:800,marginBottom:4,color:G.gold,fontSize:14}}>{etab==="employee"?"Employee":"Articled Assistant"} — Annual Allowances</div>
-        <div style={{fontSize:11,color:G.dim,marginBottom:12}}>Leaves per year for {etab==="employee"?"regular employees":"articled assistants (CA trainees)"}</div>
-        {Object.entries(tl).map(([t,lb])=>(
-          <div key={t} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${G.bdr}`}}>
-            <div><div style={{fontWeight:700,fontSize:13}}>{lb}</div><div style={{fontSize:11,color:G.dim}}>{pol[t]} days per year</div></div>
-            <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <button onClick={()=>setPol({...pol,[t]:Math.max(0,pol[t]-1)})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>−</button>
-              <input type="number" value={pol[t]} onChange={e=>setPol({...pol,[t]:Math.max(0,parseInt(e.target.value)||0)})} style={{...I,width:58,textAlign:"center",padding:"7px 5px"}}/>
-              <button onClick={()=>setPol({...pol,[t]:pol[t]+1})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>+</button>
-            </div>
-          </div>
+        {["employee","articled"].map(t=>(
+          <button key={t} onClick={()=>setEtab(t)} style={{...B(etab===t?G.gold:G.card2),flex:1,color:etab===t?"#000":"#fff",border:etab===t?"none":`1px solid ${G.bdr}`,fontWeight:700}}>
+            {t==="employee"?"👤 Employee":"📚 Articled"}
+          </button>
         ))}
-        <div style={{display:"flex",gap:8,marginTop:12}}>
-          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Save Policy</button>
-          <button onClick={reset} style={{...B(G.dim),flex:1}}>Reset All</button>
+      </div>
+
+      <div style={{...K,background:G.navy,marginBottom:8}}>
+        <div style={{color:G.gold,fontWeight:700,marginBottom:8}}>📋 Leave Balances (days/year)</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {LEAVE_KEYS.filter(k=>k!=="studyleave"||(etab==="articled")).map(k=>(
+            <div key={k} style={{flex:"1 1 45%",minWidth:130}}>
+              <label style={L}>{k==="compoff"?"Comp Off":k==="halfday"?"Half Day":k==="studyleave"?"Study Leave":k.charAt(0).toUpperCase()+k.slice(1)}</label>
+              <input type="number" style={I} value={pol[k]||0} onChange={e=>updatePol(k,e.target.value)} min={0}/>
+            </div>
+          ))}
         </div>
       </div>
-      <div style={K}>
-        <div style={{fontWeight:700,marginBottom:8,color:G.gold}}>Staff Usage Summary</div>
-        {D.users.filter(u=>u.role!=="admin").map(u=>{
-          const uPol=(D.leavePolicy||DP)[(u.employeeType||"employee")]||DP_EMP;
-          const ub=Object.keys(uPol).reduce((a,t)=>{a[t]=(D.leaves||[]).filter(l=>l.userId===u.id&&l.type===t&&l.status==="approved").length;return a;},{});
-          return(
-            <div key={u.id} style={{padding:"8px 0",borderBottom:`1px solid ${G.bdr}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                <div style={{fontWeight:700,fontSize:13}}>{u.name}</div>
-                <Chip bg={u.employeeType==="articled"?G.pu:G.bl} label={u.employeeType==="articled"?"Articled":"Employee"} sm/>
-              </div>
-              <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                {Object.entries(uPol).map(([t,mx])=>{const us=ub[t];return(<div key={t} style={{background:G.navy,borderRadius:6,padding:"2px 7px",fontSize:10,border:`1px solid ${us>=mx&&mx>0?G.rd+"44":G.bdr}`}}><span style={{color:G.dim}}>{t}:</span><span style={{color:us>=mx&&mx>0?G.rd:G.gold,fontWeight:700}}>{us}/{mx}</span></div>);})}
-              </div>
+
+      <div style={{...K,background:G.navy,marginBottom:8}}>
+        <div style={{color:G.gold,fontWeight:700,marginBottom:8}}>⏰ Late Coming / Early Leaving Rules</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {LATE_KEYS.map(([k,lb])=>(
+            <div key={k} style={{flex:"1 1 45%",minWidth:140}}>
+              <label style={L}>{lb}</label>
+              <input type="number" style={I} value={pol[k]||0} onChange={e=>updatePol(k,e.target.value)} min={0}/>
             </div>
-          );
-        })}
+          ))}
+        </div>
+        <div style={{fontSize:12,color:G.dim,marginTop:8}}>
+          ⚠️ Exceeding limits requires regularization. Not done by end of month = auto LOP.
+        </div>
+      </div>
+
+      <div style={{...K,background:G.navy,marginBottom:8}}>
+        <div style={{color:G.gold,fontWeight:700,marginBottom:8}}>📅 Comp Off Rules</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {COMPOFF_KEYS.map(([k,lb])=>(
+            <div key={k} style={{flex:"1 1 45%",minWidth:140}}>
+              <label style={L}>{lb}</label>
+              <input type="number" style={I} value={pol[k]||0} onChange={e=>updatePol(k,e.target.value)} min={0}/>
+            </div>
+          ))}
+        </div>
+        <div style={{fontSize:12,color:G.dim,marginTop:8}}>
+          Comp offs are earned by working on weekly offs or holidays with prior manager approval.
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:8,marginTop:4}}>
+        <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>💾 Save Policy</button>
+        <button onClick={reset} style={{...B(G.dim),flex:1}}>Reset</button>
       </div>
     </>
   );
@@ -1858,6 +1935,238 @@ function Profile({user,D,P,ST,setSc,logout}) {
     </div>
   );
 }
+
+// ── Work Approval Request (staff asks to work on holiday/weekoff) ─
+function WorkApprovalReq({user,D,ST,setSc,AN}) {
+  const today=new Date();
+  const [f,setF]=useState({date:"",reason:""});
+  const [checking,setChecking]=useState(false);
+
+  const isWorkableDay=(ds)=>{
+    if(!ds)return false;
+    const pol=(D.leavePolicy?.[(user.employeeType||"employee")]||DP_EMP);
+    return isDayOff(ds,D.holidays,user.weeklyOff||"sun_sat");
+  };
+
+  const submit=async()=>{
+    if(!f.date)return ST("Please select a date","error");
+    if(!isWorkableDay(f.date))return ST("Selected date is not a weekly off or holiday","error");
+    if(!f.reason.trim())return ST("Please provide a reason","error");
+    const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
+    if(!mgr)return ST("No reporting manager set. Contact admin.","error");
+    // Check if already applied
+    const existing=(D.workApprovals||[]).find(w=>w.userId===user.id&&w.date===f.date);
+    if(existing)return ST("Work approval already requested for this date","error");
+    await addWorkApproval({
+      id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
+      managerId:mgr.id,date:f.date,reason:f.reason,
+      appliedOn:new Date().toISOString(),status:"pending",type:"work_on_holiday"
+    });
+    AN(mgr.id,`${user.name} has requested to work on ${fD(f.date)} (${isHL(f.date,D.holidays)?D.holidays.find(h=>h.date===f.date)?.name||"Holiday":"Weekly Off"}). Reason: ${f.reason}`,"info");
+    ST("✅ Request sent to your manager!");setSc("home");
+  };
+
+  // Get upcoming holidays and weekoffs in next 30 days
+  const upcoming=[];
+  for(let i=0;i<30;i++){
+    const d=new Date(today);d.setDate(d.getDate()+i);
+    const ds=d.toISOString().split("T")[0];
+    if(isDayOff(ds,D.holidays,user.weeklyOff||"sun_sat")){
+      const existing=(D.workApprovals||[]).find(w=>w.userId===user.id&&w.date===ds);
+      upcoming.push({ds,name:isHL(ds,D.holidays)?D.holidays.find(h=>h.date===ds)?.name||"Holiday":"Weekly Off",status:existing?.status});
+    }
+  }
+
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:16}}>
+        <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>📅 Work on Holiday/Weekoff</h2>
+      </div>
+      <div style={{...K,background:G.navy,marginBottom:12}}>
+        <div style={{color:G.gold,fontWeight:700,marginBottom:4}}>How it works</div>
+        <div style={{fontSize:12,color:G.dim}}>Request approval to work on a holiday or weekly off. Once approved, you earn a comp off that can be availed later.</div>
+      </div>
+      <div style={K}>
+        <div style={{fontWeight:700,color:G.gold,marginBottom:10}}>Upcoming Offs (next 30 days)</div>
+        {upcoming.map(u=>(
+          <div key={u.ds} onClick={()=>!u.status&&setF({...f,date:u.ds})} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${G.bdr}`,cursor:u.status?"default":"pointer",opacity:u.status?0.6:1}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:13}}>{fD(u.ds)}</div>
+              <div style={{fontSize:11,color:G.mut}}>{u.name}</div>
+            </div>
+            {u.status
+              ?<Chip bg={u.status==="approved"?G.gr:u.status==="rejected"?G.rd:G.am} label={u.status} sm/>
+              :<button style={{...B(f.date===u.ds?G.gold:G.card2),fontSize:11,padding:"4px 10px",color:f.date===u.ds?"#000":"#fff",border:f.date===u.ds?"none":`1px solid ${G.bdr}`}}>
+                {f.date===u.ds?"✓ Selected":"Select"}
+              </button>
+            }
+          </div>
+        ))}
+        {upcoming.length===0&&<div style={{color:G.dim,fontSize:12,textAlign:"center",padding:16}}>No upcoming holidays or weekly offs in next 30 days</div>}
+      </div>
+      {f.date&&(
+        <div style={K}>
+          <div style={{fontWeight:700,color:G.gold,marginBottom:8}}>Request for {fD(f.date)}</div>
+          <FRow label="Reason for working">
+            <textarea style={{...I,resize:"vertical",minHeight:80}} value={f.reason} onChange={e=>setF({...f,reason:e.target.value})} placeholder="Why do you need to work on this day?"/>
+          </FRow>
+          <button onClick={submit} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>📤 Send Request</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Comp Off Management (admin/manager view) ──────────────────────
+function CompOffMgmt({D,P,ST,AN,user,vu,isA}) {
+  const [tab,setTab]=useState("approvals"); // approvals | earned | availed
+
+  // Work approval requests pending
+  const pendingWork=(D.workApprovals||[]).filter(w=>
+    w.status==="pending"&&(isA||w.managerId===user.id)
+  ).sort((a,b)=>b.appliedOn?.localeCompare(a.appliedOn));
+
+  // Approved work = earned comp offs
+  const earnedCompOffs=(D.workApprovals||[]).filter(w=>
+    w.status==="approved"&&vu.some(u=>u.id===w.userId)
+  );
+
+  // Comp off leaves applied
+  const compOffLeaves=(D.leaves||[]).filter(l=>
+    l.type==="compoff"&&vu.some(u=>u.id===l.userId)
+  );
+
+  const approveWork=async(id)=>{
+    const w=(D.workApprovals||[]).find(x=>x.id===id);
+    if(!w)return;
+    await updateWorkApproval(id,{status:"approved",reviewedOn:new Date().toISOString(),reviewedBy:user.id});
+    AN(w.userId,`Your request to work on ${fD(w.date)} has been approved. You will earn a comp off.`,"success");
+    ST("✅ Approved! Comp off will be credited after they work.");
+  };
+
+  const rejectWork=async(id)=>{
+    const w=(D.workApprovals||[]).find(x=>x.id===id);
+    if(!w)return;
+    await updateWorkApproval(id,{status:"rejected",reviewedOn:new Date().toISOString(),reviewedBy:user.id});
+    AN(w.userId,`Your request to work on ${fD(w.date)} has been rejected.`,"error");
+    ST("❌ Rejected");
+  };
+
+  const cancelCompOff=async(id,type)=>{
+    if(!confirm(`Cancel this ${type==="work"?"work approval":"comp off leave"}?`))return;
+    if(type==="work"){
+      await updateWorkApproval(id,{status:"cancelled",reviewedOn:new Date().toISOString(),reviewedBy:user.id});
+      ST("Comp off cancelled");
+    } else {
+      await updateLeave(id,{status:"cancelled",reviewedOn:new Date().toISOString()});
+      ST("Leave cancelled");
+    }
+  };
+
+  const statusColor={pending:G.am,approved:G.gr,rejected:G.rd,cancelled:G.dim};
+
+  return (
+    <>
+      <div style={{display:"flex",gap:6,marginBottom:12,overflowX:"auto"}}>
+        {[["approvals","⏳ Pending"],["earned","✅ Earned"],["availed","📋 Availed"]].map(([t,lb])=>(
+          <button key={t} onClick={()=>setTab(t)} style={{...B(tab===t?G.gold:G.card2),color:tab===t?"#000":"#fff",border:tab===t?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"7px 12px",whiteSpace:"nowrap",fontWeight:700,flexShrink:0}}>
+            {lb}{t==="approvals"&&pendingWork.length>0?` (${pendingWork.length})`:""}
+          </button>
+        ))}
+      </div>
+
+      {tab==="approvals"&&(
+        <>
+          <div style={{...K,background:G.navy}}><div style={{color:G.gold,fontWeight:700}}>Work on Holiday/Weekoff Requests</div></div>
+          {pendingWork.length===0&&<div style={{textAlign:"center",color:G.dim,padding:24}}>No pending requests</div>}
+          {pendingWork.map(w=>{
+            const staff=(D.users||[]).find(u=>u.id===w.userId);
+            const isHoliday=isHL(w.date,D.holidays);
+            const dayName=isHoliday?D.holidays.find(h=>h.date===w.date)?.name||"Holiday":"Weekly Off";
+            return(
+              <div key={w.id} style={K}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                  <div>
+                    <div style={{fontWeight:700}}>{staff?.name||w.userName}</div>
+                    <div style={{fontSize:12,color:G.mut}}>{fD(w.date)} · {dayName}</div>
+                    <div style={{fontSize:12,color:G.dim,marginTop:2}}>"{w.reason}"</div>
+                    <div style={{fontSize:11,color:G.dim,marginTop:2}}>Applied: {fD(w.appliedOn)}</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>approveWork(w.id)} style={{...B(G.gr),flex:2,fontSize:12,fontWeight:700}}>✅ Approve</button>
+                  <button onClick={()=>rejectWork(w.id)} style={{...B(G.rd),flex:1,fontSize:12}}>✕ Reject</button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {tab==="earned"&&(
+        <>
+          <div style={{...K,background:G.navy}}><div style={{color:G.gold,fontWeight:700}}>Earned Comp Offs (approved work days)</div></div>
+          {earnedCompOffs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:24}}>No earned comp offs</div>}
+          {earnedCompOffs.map(w=>{
+            const staff=(D.users||[]).find(u=>u.id===w.userId);
+            return(
+              <div key={w.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:13}}>{staff?.name||w.userName}</div>
+                  <div style={{fontSize:12,color:G.mut}}>Worked on: {fD(w.date)}</div>
+                  <div style={{fontSize:11,color:G.dim}}>Approved by: {(D.users||[]).find(u=>u.id===w.reviewedBy)?.name||"Manager"}</div>
+                </div>
+                <button onClick={()=>cancelCompOff(w.id,"work")} style={{...B(G.rd),fontSize:11,padding:"5px 10px"}}>Cancel</button>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {tab==="availed"&&(
+        <>
+          <div style={{...K,background:G.navy}}><div style={{color:G.gold,fontWeight:700}}>Comp Off Leaves Applied</div></div>
+          {compOffLeaves.length===0&&<div style={{textAlign:"center",color:G.dim,padding:24}}>No comp off leaves applied</div>}
+          {compOffLeaves.map(l=>{
+            const staff=(D.users||[]).find(u=>u.id===l.userId);
+            return(
+              <div key={l.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:13}}>{staff?.name||l.userName}</div>
+                  <div style={{fontSize:12,color:G.mut}}>{fD(l.from)}{l.from!==l.to?` to ${fD(l.to)}`:""}</div>
+                  <Chip bg={statusColor[l.status]||G.dim} label={l.status} sm/>
+                </div>
+                {l.status==="pending"&&<button onClick={()=>cancelCompOff(l.id,"leave")} style={{...B(G.rd),fontSize:11,padding:"5px 10px"}}>Cancel</button>}
+              </div>
+            );
+          })}
+        </>
+      )}
+    </>
+  );
+}
+
+// ── Late/Early LOP Check (auto-detect and flag) ───────────────────
+function getLateEarlyStatus(D, userId, month) {
+  const pol=(D.leavePolicy?.employee||DP_EMP);
+  const monthRecs=(D.attendance||[]).filter(a=>a.userId===userId&&a.date?.startsWith(month));
+  const lateCount=monthRecs.filter(a=>a.status==="late"&&!a.lateApproved).length;
+  const earlyCount=monthRecs.filter(a=>a.earlyLeaving&&!a.earlyApproved).length;
+  const today=new Date();
+  const lastDay=new Date(today.getFullYear(),today.getMonth()+1,0).getDate();
+  const dayOfMonth=today.getDate();
+  const isUrgent=dayOfMonth>=(lastDay-(pol.lopUrgentDays||2)+1);
+  const deadlineDay=pol.lopDeadlineDay||31;
+  return {
+    lateCount,earlyCount,
+    lateExceeded:lateCount>(pol.lateAllowed||3),
+    earlyExceeded:earlyCount>(pol.earlyAllowed||3),
+    needsReg:lateCount>(pol.lateAllowed||3)||earlyCount>(pol.earlyAllowed||3),
+    isUrgent,deadlineDay,lastDay
+  };
+}
+
 
 function LateApproval({user,D,P,ST,AN,setSc}) {
   const [reason,setReason]=useState("");

@@ -175,3 +175,27 @@ export const restoreBackup = async (backupId) => {
     throw e;
   }
 };
+
+// ── Comp Off Work Approvals ───────────────────────────────────────
+export const addWorkApproval = async (rec) => {
+  await setDoc(doc(db, 'workApprovals', rec.id), { ...rec, updatedAt: serverTimestamp() });
+};
+export const updateWorkApproval = async (id, data) => {
+  await updateDoc(doc(db, 'workApprovals', id), { ...data, updatedAt: serverTimestamp() });
+};
+export const onWorkApprovals = (cb) => onSnapshot(
+  collection(db, 'workApprovals'),
+  snap => cb(snap.docs.map(d => d.data()))
+);
+
+// ── Comp Off Credits ──────────────────────────────────────────────
+export const addCompOff = async (rec) => {
+  await setDoc(doc(db, 'compoffs', rec.id), { ...rec, updatedAt: serverTimestamp() });
+};
+export const updateCompOff = async (id, data) => {
+  await updateDoc(doc(db, 'compoffs', id), { ...data, updatedAt: serverTimestamp() });
+};
+export const onCompOffs = (cb) => onSnapshot(
+  collection(db, 'compoffs'),
+  snap => cb(snap.docs.map(d => d.data()))
+);
