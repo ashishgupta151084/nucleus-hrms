@@ -270,12 +270,17 @@ export default function App() {
       if(cfg&&cfg.users&&cfg.users.length>0){
         // ONLY READ - never write back to Firebase automatically
         setD(prev=>({...prev,...cfg,loaded:true}));
-        // Daily auto-backup: backup once per day
-        const today=new Date().toISOString().slice(0,10);
-        const lastBackup=localStorage.getItem('lastBackupDate');
-        if(lastBackup!==today){
+        // Twice-daily backup: once at noon, once at midnight (IST)
+        const now=new Date();
+        const istOffset=330; // IST = UTC+5:30
+        const istNow=new Date(now.getTime()+istOffset*60000);
+        const hour=istNow.getUTCHours();
+        const slot=hour>=12?'noon':'midnight'; // noon=12:00-23:59, midnight=00:00-11:59
+        const backupKey=istNow.toISOString().slice(0,10)+'_'+slot;
+        const lastBackup=localStorage.getItem('lastBackupKey');
+        if(lastBackup!==backupKey){
           saveBackup(cfg).then(()=>{
-            localStorage.setItem('lastBackupDate',today);
+            localStorage.setItem('lastBackupKey',backupKey);
           }).catch(()=>{});
         }
       } else {
