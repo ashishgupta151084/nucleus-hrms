@@ -5,21 +5,15 @@ import {
   addLeave, updateLeave, deleteLeave, onLeaves,
   addReg, updateReg, onRegs,
   updateLiveLocation, onLiveLocations,
-  addNotification, updateNotification, onNotifications
+  addNotification, updateNotification, onNotifications,
+  saveBackup, getBackups, restoreBackup
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
 // ── Auto-backup before every config save ─────────────────────────
-const saveBackup = async (data) => {
-  try {
-    const {db} = await import("./firebase");
-    const {doc,setDoc} = await import("firebase/firestore");
-    const key = "backup_"+new Date().toISOString().slice(0,19).replace(/[:.T]/g,"-");
-    await setDoc(doc(db,"backups",key), {...data, backedUpAt:new Date().toISOString()});
-  } catch(e) { console.warn("Backup failed:", e.message); }
-};
+
 
 // ── MSG91 WhatsApp Notifications ─────────────────────────────────
 // Sign up at msg91.com, get your AUTH_KEY and create templates
@@ -229,19 +223,19 @@ export default function App() {
   useEffect(()=>{
     const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
-        // Ensure master admin always exists with correct credentials
-        const users=cfg.users.map(u=>u.role==="admin"?{...u,email:"ag@nucleusadvisors.in",password:"Nucleus123#",name:"Ashish Gupta"}:u);
-        setD(prev=>({...prev,...cfg,users,loaded:true}));
-        // Fix Firebase if admin email is wrong
-        if(cfg.users.some(u=>u.role==="admin"&&u.email!=="ag@nucleusadvisors.in")){
-          setConfig(clean({...cfg,users})).catch(()=>{});
+        // ONLY READ - never write back to Firebase automatically
+        setD(prev=>({...prev,...cfg,loaded:true}));
+        // Daily auto-backup: backup once per day
+        const today=new Date().toISOString().slice(0,10);
+        const lastBackup=localStorage.getItem('lastBackupDate');
+        if(lastBackup!==today){
+          saveBackup(cfg).then(()=>{
+            localStorage.setItem('lastBackupDate',today);
+          }).catch(()=>{});
         }
-      } else if(cfg&&(!cfg.users||cfg.users.length===0)){
-        // Config exists but users is empty - DO NOT overwrite, just load what we have
-        setD(prev=>({...prev,...cfg,users:prev.users||SEED.users,loaded:true}));
       } else {
-        // Truly empty Firestore - write SEED only on first run
-        setConfig(clean({companyName:SEED.companyName,users:SEED.users,offices:SEED.offices,teams:SEED.teams,branches:[],leavePolicy:SEED.leavePolicy,holidays:SEED.holidays})).catch(()=>{});
+        // No data - just mark as loaded, NEVER write to Firebase
+        setD(prev=>({...prev,loaded:true}));
       }
     });
     return unsub;
@@ -812,7 +806,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
@@ -856,8 +850,12 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="of"&&isA&&<OC {...tp}/>}
       {tab==="org"&&<ORG {...tp}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
+      {tab==="bk"&&isA&&<BK {...tp}/>}
+      {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
+      {tab==="bk"&&isA&&<BK {...tp}/>}
+      {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
     </div>
   );
@@ -2012,6 +2010,93 @@ function BR({D,P,ST}) {
           </div>
         );
       })}
+    </>
+  );
+}
+
+
+function BK({D,P,ST}) {
+  const [backups,setBackups]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [restoring,setRestoring]=useState(null);
+
+  useEffect(()=>{
+    getBackups().then(b=>{setBackups(b);setLoading(false);}).catch(()=>setLoading(false));
+  },[]);
+
+  const doBackup=async()=>{
+    ST("💾 Creating backup...");
+    await saveBackup(D);
+    const b=await getBackups();
+    setBackups(b);
+    ST("✅ Backup created successfully!");
+  };
+
+  const doRestore=async(id,backedUpAt,userCount)=>{
+    if(!confirm(`Restore backup from ${new Date(backedUpAt).toLocaleString()}?
+
+This will restore ${userCount} users, offices, teams and all settings.
+
+Current data will be overwritten.`))return;
+    setRestoring(id);
+    try{
+      const cfg=await restoreBackup(id);
+      P({...D,...cfg});
+      ST("✅ Data restored successfully! Please refresh the page.");
+      setTimeout(()=>window.location.reload(),2000);
+    }catch(e){
+      ST("❌ Restore failed: "+e.message,"error");
+    }
+    setRestoring(null);
+  };
+
+  return (
+    <>
+      <div style={{...K,background:"#001a0f",border:`1px solid ${G.gr}`}}>
+        <div style={{color:G.gr,fontWeight:800,fontSize:14}}>💾 Backup & Restore</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:4}}>
+          Auto-backup runs daily. Manual backup available anytime. Restore to any previous backup.
+        </div>
+      </div>
+
+      <button onClick={doBackup} style={{...B(`linear-gradient(135deg,${G.gr},#059669)`),width:"100%",marginBottom:12,fontWeight:800,fontSize:14}}>
+        💾 Create Backup Now
+      </button>
+
+      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>
+        {loading?"Loading backups...":backups.length===0?"No backups yet":`${backups.length} Backups Available`}
+      </div>
+
+      {backups.map(b=>(
+        <div key={b.id} style={{...K,border:`1px solid ${G.bdr}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:13,color:G.txt}}>
+                📅 {new Date(b.backedUpAt).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+              </div>
+              <div style={{fontSize:12,color:G.mut,marginTop:2}}>
+                👥 {b.userCount||b.users?.length||0} users · 
+                🏢 {b.offices?.length||0} offices · 
+                🏷 {b.teams?.length||0} teams
+              </div>
+            </div>
+            <button
+              onClick={()=>doRestore(b.id,b.backedUpAt,b.userCount||b.users?.length||0)}
+              disabled={restoring===b.id}
+              style={{...B(restoring===b.id?G.dim:G.gold),color:"#000",fontSize:12,fontWeight:800,padding:"8px 14px",flexShrink:0}}
+            >
+              {restoring===b.id?"Restoring...":"↩️ Restore"}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {!loading&&backups.length===0&&(
+        <div style={{textAlign:"center",color:G.dim,padding:32}}>
+          <div style={{fontSize:40,marginBottom:8}}>💾</div>
+          <div>No backups yet. Click "Create Backup Now" to create the first one.</div>
+        </div>
+      )}
     </>
   );
 }
