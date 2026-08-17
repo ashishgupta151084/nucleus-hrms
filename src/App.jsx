@@ -315,6 +315,16 @@ export default function App() {
   const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
   const unread=(D.notifications||[]).filter(n=>n.userId===cu?.id&&!n.read).length;
   const props={user:cu,D,P,ST,AN,logout,setSc,unread};
+  // Show loading overlay after login until Firebase data arrives
+  if(cu && !D.loaded) return (
+    <div style={{minHeight:"100vh",background:G.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,fontFamily:"'Nunito',sans-serif"}}>
+      <div style={{width:48,height:48,border:`4px solid ${G.gold}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+      <div style={{color:G.gold,fontWeight:700,fontSize:15}}>Loading your data…</div>
+      <div style={{color:G.dim,fontSize:12}}>Connecting to server</div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
@@ -469,19 +479,44 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
 
     startGpsFlow();
   };
-  const doIn=()=>{
-    // If there's already a checked-out record today, create new record for re-checkin
+  const doIn=async()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
-    addAttendance({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,date:tod(),checkIn:new Date().toISOString(),checkOut:null,selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh});
-    ST(wfh?"🏠 WFH done!":lb>30?`⚠️ ${lb}m late`:"✅ Checked in!");setStep("done");
+    const rec2={id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
+      date:tod(),checkIn:new Date().toISOString(),checkOut:null,
+      selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,
+      status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh};
+    try{
+      await addAttendance(rec2);
+      let msg="✅ Checked in!";
+      if(wfh)msg="🏠 WFH check-in done!";
+      else if(lb>30)msg=`⚠️ ${lb}m late — check-in saved!`;
+      ST(msg);setStep("done");
+    }catch(e){
+      // Retry once on failure
+      try{
+        await addAttendance({...rec2,id:gid()});
+        ST("✅ Checked in!");setStep("done");
+      }catch(e2){
+        ST("❌ Check-in failed! Please try again. Error: "+e2.message,"error");
+        setStep("idle");
+      }
+    }
   };
-  const doOut=()=>{
-    const go=cg=>{
-      updateAttendance(rec.id,{checkOut:new Date().toISOString(),checkOutGps:cg});
-      notifyCheckout(user, fT(new Date().toISOString()), wHr(rec.checkIn,new Date().toISOString())||"");
-      ST("👋 Out!");
+  const doOut=async()=>{
+    const checkOutTime=new Date().toISOString();
+    const go=async(cg)=>{
+      try{
+        await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg});
+        notifyCheckout(user, fT(checkOutTime), wHr(rec.checkIn,checkOutTime)||"");
+        ST("👋 Checked out successfully!");
+      }catch(e){
+        ST("❌ Check-out failed! Please try again.","error");
+      }
     };
-    navigator.geolocation?.getCurrentPosition(p=>go({lat:p.coords.latitude,lng:p.coords.longitude}),()=>go(null));
+    navigator.geolocation?.getCurrentPosition(
+      p=>go({lat:p.coords.latitude,lng:p.coords.longitude}),
+      ()=>go(null)
+    );
   };
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
@@ -2151,4 +2186,4 @@ function RST({D,P,ST,logout}) {
       {step==="confirm_users"&&(<div style={{...K,border:`1px solid ${G.pu}`}}><button onClick={()=>setStep("menu")} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px",marginBottom:12}}>← Back</button><FRow label="Type: RESET USERS"><input style={I} value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="RESET USERS"/></FRow><button onClick={resetUsers} style={{...B(G.pu),width:"100%",fontWeight:800}}>Confirm</button></div>)}
     </div>
   );
-} 
+}
