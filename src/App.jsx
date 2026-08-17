@@ -270,6 +270,11 @@ export default function App() {
       console.warn("P() called with empty users - skipping Firebase write");
       return;
     }
+    // Safety: never write fewer users than currently loaded (unless intentional deletion)
+    if(D.users&&D.users.length>0&&nd.users.length<D.users.length-1){
+      console.warn("P() reducing users from",D.users.length,"to",nd.users.length,"- blocked");
+      return;
+    }
     const configData=clean({
       users:nd.users,
       offices:nd.offices,

@@ -20,10 +20,27 @@ export const getConfig = async () => {
 };
 
 export const setConfig = async (data) => {
-  // SAFETY LAYER 1: Never write if users array is empty
+  // SAFETY: Never write if users array is empty
   if (!data.users || data.users.length === 0) {
-    console.error('BLOCKED: setConfig called with empty users - data is safe');
+    console.error('BLOCKED: setConfig called with empty users');
     return;
+  }
+  // SAFETY: Check existing data before overwriting
+  try {
+    const existing = await getDoc(doc(db, 'app', 'config'));
+    if (existing.exists()) {
+      const existingData = existing.data();
+      // Never reduce user count by more than 1 (only allow intentional deletions)
+      if (existingData.users && existingData.users.length > data.users.length + 1) {
+        console.error('BLOCKED: Attempt to reduce users from', existingData.users.length, 'to', data.users.length);
+        // Save emergency backup
+        const key = 'emergency_' + new Date().toISOString().slice(0,19).replace(/[:.T]/g,'-');
+        await setDoc(doc(db, 'backups', key), {...existingData, backedUpAt: new Date().toISOString(), emergency: true});
+        return;
+      }
+    }
+  } catch(e) {
+    console.warn('Pre-write check failed:', e.message);
   }
   await setDoc(doc(db, 'app', 'config'), data, { merge: true });
 };
