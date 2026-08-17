@@ -851,11 +851,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="org"&&<ORG {...tp}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
-      {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
-      {tab==="br"&&isA&&<BR {...tp}/>}
-      {tab==="bk"&&isA&&<BK {...tp}/>}
-      {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
     </div>
   );
@@ -2020,32 +2016,44 @@ function BK({D,P,ST}) {
   const [loading,setLoading]=useState(true);
   const [restoring,setRestoring]=useState(null);
 
-  useEffect(()=>{
-    getBackups().then(b=>{setBackups(b);setLoading(false);}).catch(()=>setLoading(false));
-  },[]);
+  const loadBackups=()=>{
+    setLoading(true);
+    getBackups()
+      .then(b=>{
+        console.log("Backups loaded:", b.length, b);
+        setBackups(b);
+        setLoading(false);
+      })
+      .catch(e=>{
+        console.error("Failed to load backups:", e);
+        ST("Could not load backups: "+e.message,"error");
+        setLoading(false);
+      });
+  };
+
+  useEffect(()=>{loadBackups();},[]);
 
   const doBackup=async()=>{
     ST("💾 Creating backup...");
-    await saveBackup(D);
-    const b=await getBackups();
-    setBackups(b);
-    ST("✅ Backup created successfully!");
+    try{
+      await saveBackup(D);
+      await loadBackups();
+      ST("✅ Backup created! "+D.users?.length+" users saved.");
+    }catch(e){
+      ST("Backup failed: "+e.message,"error");
+    }
   };
 
-  const doRestore=async(id,backedUpAt,userCount)=>{
-    if(!confirm(`Restore backup from ${new Date(backedUpAt).toLocaleString()}?
-
-This will restore ${userCount} users, offices, teams and all settings.
-
-Current data will be overwritten.`))return;
-    setRestoring(id);
+  const doRestore=async(b)=>{
+    if(!confirm(`Restore backup from ${new Date(b.backedUpAt).toLocaleString("en-IN")}?\n\n${b.userCount||b.users?.length||0} users will be restored.\n\nClick OK to confirm.`))return;
+    setRestoring(b.id);
     try{
-      const cfg=await restoreBackup(id);
+      const cfg=await restoreBackup(b.id);
       P({...D,...cfg});
-      ST("✅ Data restored successfully! Please refresh the page.");
+      ST("✅ Restored successfully! Reloading...");
       setTimeout(()=>window.location.reload(),2000);
     }catch(e){
-      ST("❌ Restore failed: "+e.message,"error");
+      ST("Restore failed: "+e.message,"error");
     }
     setRestoring(null);
   };
@@ -2054,53 +2062,50 @@ Current data will be overwritten.`))return;
     <>
       <div style={{...K,background:"#001a0f",border:`1px solid ${G.gr}`}}>
         <div style={{color:G.gr,fontWeight:800,fontSize:14}}>💾 Backup & Restore</div>
-        <div style={{color:G.dim,fontSize:12,marginTop:4}}>
-          Auto-backup runs daily. Manual backup available anytime. Restore to any previous backup.
-        </div>
+        <div style={{color:G.dim,fontSize:12,marginTop:4}}>Auto-backup runs daily. You can also create manual backups anytime and restore to any previous backup.</div>
       </div>
 
-      <button onClick={doBackup} style={{...B(`linear-gradient(135deg,${G.gr},#059669)`),width:"100%",marginBottom:12,fontWeight:800,fontSize:14}}>
-        💾 Create Backup Now
-      </button>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <button onClick={doBackup} style={{...B(`linear-gradient(135deg,${G.gr},#059669)`),flex:2,fontWeight:800}}>💾 Backup Now</button>
+        <button onClick={loadBackups} style={{...B(G.navyL),flex:1,border:`1px solid ${G.bdr}`,fontSize:12}}>🔄 Refresh</button>
+      </div>
 
       <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>
-        {loading?"Loading backups...":backups.length===0?"No backups yet":`${backups.length} Backups Available`}
+        {loading?"Loading...":backups.length===0?"No backups found":`${backups.length} backups available`}
       </div>
 
       {backups.map(b=>(
         <div key={b.id} style={{...K,border:`1px solid ${G.bdr}`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div>
-              <div style={{fontWeight:700,fontSize:13,color:G.txt}}>
-                📅 {new Date(b.backedUpAt).toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:12,color:G.gold}}>
+                📅 {new Date(b.backedUpAt).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})} {new Date(b.backedUpAt).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}
               </div>
-              <div style={{fontSize:12,color:G.mut,marginTop:2}}>
-                👥 {b.userCount||b.users?.length||0} users · 
-                🏢 {b.offices?.length||0} offices · 
-                🏷 {b.teams?.length||0} teams
+              <div style={{fontSize:11,color:G.mut,marginTop:2}}>
+                👥 {b.userCount||b.users?.length||0} users · 🏢 {b.offices?.length||0} offices · 🏷 {b.teams?.length||0} teams
               </div>
             </div>
             <button
-              onClick={()=>doRestore(b.id,b.backedUpAt,b.userCount||b.users?.length||0)}
-              disabled={restoring===b.id}
-              style={{...B(restoring===b.id?G.dim:G.gold),color:"#000",fontSize:12,fontWeight:800,padding:"8px 14px",flexShrink:0}}
+              onClick={()=>doRestore(b)}
+              disabled={!!restoring}
+              style={{...B(restoring===b.id?G.dim:G.am),color:"#000",fontSize:11,fontWeight:800,padding:"7px 12px",flexShrink:0}}
             >
-              {restoring===b.id?"Restoring...":"↩️ Restore"}
+              {restoring===b.id?"⏳ Restoring...":"↩️ Restore"}
             </button>
           </div>
         </div>
       ))}
 
       {!loading&&backups.length===0&&(
-        <div style={{textAlign:"center",color:G.dim,padding:32}}>
-          <div style={{fontSize:40,marginBottom:8}}>💾</div>
-          <div>No backups yet. Click "Create Backup Now" to create the first one.</div>
+        <div style={{textAlign:"center",padding:32,color:G.dim}}>
+          <div style={{fontSize:48,marginBottom:8}}>💾</div>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>No backups yet</div>
+          <div style={{fontSize:12}}>Click "Backup Now" to create your first backup</div>
         </div>
       )}
     </>
   );
 }
-
 
 function RST({D,P,ST,logout}) {
   const [pwd,setPwd]=useState("");
