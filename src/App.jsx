@@ -12,7 +12,52 @@ import {
 // Strip undefined values before saving to Firestore
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
-// ── Auto-backup before every config save ─────────────────────────
+const CONFIG_FIELDS = [
+  "users", "offices", "teams", "branches", "leavePolicy", "holidays",
+  "companyName", "firmId", "firmPlan", "firmTrial"
+];
+const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays"]);
+
+const configFrom = data => clean({
+  users: data.users || [],
+  offices: data.offices || [],
+  teams: data.teams || [],
+  branches: data.branches || [],
+  leavePolicy: data.leavePolicy || null,
+  holidays: data.holidays || [],
+  companyName: data.companyName || "Nucleus HRMS",
+  firmId: data.firmId || null,
+  firmPlan: data.firmPlan || null,
+  firmTrial: data.firmTrial || null,
+});
+
+const isEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+const getRecordChanges = (previous = [], next = []) => {
+  const previousById = new Map(previous.filter(item => item?.id).map(item => [item.id, item]));
+  const nextById = new Map(next.filter(item => item?.id).map(item => [item.id, item]));
+
+  return {
+    upserts: next.filter(item => item?.id && !isEqual(previousById.get(item.id), item)),
+    removeIds: previous.filter(item => item?.id && !nextById.has(item.id)).map(item => item.id),
+  };
+};
+
+const getConfigChanges = (previous, next) => {
+  const changes = {};
+  const arrayChanges = {};
+
+  CONFIG_FIELDS.forEach(field => {
+    if (isEqual(previous[field], next[field])) return;
+    if (CONFIG_RECORD_FIELDS.has(field)) {
+      arrayChanges[field] = getRecordChanges(previous[field], next[field]);
+    } else {
+      changes[field] = next[field];
+    }
+  });
+
+  return { changes, arrayChanges };
+};
 
 
 // ── MSG91 WhatsApp Notifications ─────────────────────────────────
@@ -265,32 +310,20 @@ export default function App() {
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
   const P=useCallback(nd=>{
     setD(nd);
-    // Safety: never write empty users array to Firebase
-    if(!nd.users||nd.users.length===0){
-      console.warn("P() called with empty users - skipping Firebase write");
-      return;
-    }
-    // Safety: never write fewer users than currently loaded (unless intentional deletion)
-    if(D.users&&D.users.length>0&&nd.users.length<D.users.length-1){
-      console.warn("P() reducing users from",D.users.length,"to",nd.users.length,"- blocked");
-      return;
-    }
-    const configData=clean({
-      users:nd.users,
-      offices:nd.offices,
-      teams:nd.teams,
-      branches:nd.branches||[],
-      leavePolicy:nd.leavePolicy,
-      holidays:nd.holidays,
-      companyName:nd.companyName,
-      firmId:nd.firmId||null,
-      firmPlan:nd.firmPlan||null,
-      firmTrial:nd.firmTrial||null,
-    });
-    // Save backup before writing
+    const previousConfig=configFrom(D);
+    const configData=configFrom(nd);
+    const {changes,arrayChanges}=getConfigChanges(previousConfig,configData);
+
+    // Attendance, leave, location and notification data are saved in their own
+    // collections. Do not create a config write when only those changed.
+    if(Object.keys(changes).length===0&&Object.keys(arrayChanges).length===0)return;
+
+    // Keep a recoverable snapshot of the intended post-save configuration.
     saveBackup(configData).catch(()=>{});
-    setConfig(configData);
-  },[]);
+    setConfig({changes,arrayChanges,initialConfig:configData}).catch(error=>{
+      console.error("Config save failed:",error);
+    });
+  },[D]);
   const AN=useCallback((uid,msg,type="info")=>{
     addNotification({id:gid(),userId:uid,msg,type,ts:new Date().toISOString(),read:false});
   },[]);

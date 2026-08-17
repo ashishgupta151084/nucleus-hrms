@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, where, orderBy, limit, getDocs, updateDoc, deleteDoc, runTransaction, serverTimestamp } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBMiDU_w76c7aAIJY37tIGncCrEOqZYXCQ",
@@ -19,30 +19,44 @@ export const getConfig = async () => {
   return snap.exists() ? snap.data() : null;
 };
 
-export const setConfig = async (data) => {
-  // SAFETY: Never write if users array is empty
-  if (!data.users || data.users.length === 0) {
-    console.error('BLOCKED: setConfig called with empty users');
-    return;
-  }
-  // SAFETY: Check existing data before overwriting
-  try {
-    const existing = await getDoc(doc(db, 'app', 'config'));
-    if (existing.exists()) {
-      const existingData = existing.data();
-      // Never reduce user count by more than 1 (only allow intentional deletions)
-      if (existingData.users && existingData.users.length > data.users.length + 1) {
-        console.error('BLOCKED: Attempt to reduce users from', existingData.users.length, 'to', data.users.length);
-        // Save emergency backup
-        const key = 'emergency_' + new Date().toISOString().slice(0,19).replace(/[:.T]/g,'-');
-        await setDoc(doc(db, 'backups', key), {...existingData, backedUpAt: new Date().toISOString(), emergency: true});
-        return;
-      }
+const mergeRecords = (currentRecords, changes) => {
+  const records = new Map(
+    (Array.isArray(currentRecords) ? currentRecords : [])
+      .filter(record => record?.id)
+      .map(record => [record.id, record])
+  );
+
+  (changes.removeIds || []).forEach(id => records.delete(id));
+  (changes.upserts || []).forEach(record => {
+    if (record?.id) records.set(record.id, record);
+  });
+
+  return [...records.values()];
+};
+
+// Apply only the changes made by the current client.  Saving the entire config
+// document meant an older tab could overwrite offices, teams, or staff added
+// from another device.  The transaction reads the latest document first and
+// merges record-level changes into it.
+export const setConfig = async ({ changes = {}, arrayChanges = {}, initialConfig = null } = {}) => {
+  const configRef = doc(db, 'app', 'config');
+
+  await runTransaction(db, async transaction => {
+    const snap = await transaction.get(configRef);
+    const current = snap.exists() ? snap.data() : {};
+    const update = snap.exists() ? { ...changes } : { ...(initialConfig || {}), ...changes };
+
+    Object.entries(arrayChanges).forEach(([field, fieldChanges]) => {
+      const baseline = snap.exists()
+        ? current[field]
+        : (initialConfig?.[field] || []);
+      update[field] = mergeRecords(baseline, fieldChanges);
+    });
+
+    if (Object.keys(update).length > 0) {
+      transaction.set(configRef, update, { merge: true });
     }
-  } catch(e) {
-    console.warn('Pre-write check failed:', e.message);
-  }
-  await setDoc(doc(db, 'app', 'config'), data, { merge: true });
+  });
 };
 
 export const onConfig = (cb) => onSnapshot(
