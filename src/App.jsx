@@ -6,10 +6,7 @@ import {
   addReg, updateReg, onRegs,
   updateLiveLocation, onLiveLocations,
   addNotification, updateNotification, onNotifications,
-  saveBackup, getBackups, restoreBackup, cleanupBackups,
-  addWorkApproval, updateWorkApproval, onWorkApprovals,
-  addCompOff, updateCompOff, onCompOffs,
-  saveUserPassword, getUserPasswords
+  saveBackup, getBackups, restoreBackup
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
@@ -262,7 +259,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],compoffs:[],workApprovals:[],liveLocations:{},notifications:[],userPasswords:{},loaded:false});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -272,17 +269,8 @@ export default function App() {
     const unsub=onConfig(cfg=>{
       if(cfg&&cfg.users&&cfg.users.length>0){
         // ONLY READ - never write back to Firebase automatically
-        // Load user passwords separately (not affected by backup/restore)
-        getUserPasswords().then(pwds=>{
-          setD(prev=>({...prev,...cfg,userPasswords:pwds,loaded:true}));
-        }).catch(()=>{
-          getUserPasswords().then(pwds=>{
-          setD(prev=>({...prev,...cfg,userPasswords:pwds,loaded:true}));
-        }).catch(()=>{
-          setD(prev=>({...prev,...cfg,loaded:true}));
-        });
-        });
-        // Twice-daily backup using sessionStorage (per tab, no cross-device triggers)
+        setD(prev=>({...prev,...cfg,loaded:true}));
+        // Twice-daily backup - use sessionStorage to prevent per-device triggers
         const now=new Date();
         const istNow=new Date(now.getTime()+330*60000);
         const hour=istNow.getUTCHours();
@@ -325,16 +313,19 @@ export default function App() {
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
   const P=useCallback(nd=>{
     setD(nd);
-    // SAFETY: Never write if Firebase hasn't loaded real data yet
+
+    // CRITICAL SAFETY GUARDS - never write to Firebase if:
+    // 1. Firebase hasn't loaded real data yet (would write empty/SEED data)
     if(!D.loaded){
-      console.warn("P() blocked - Firebase not loaded yet");
+      console.warn("P() blocked: Firebase not loaded yet");
       return;
     }
-    // SAFETY: Never write empty users
+    // 2. Users array is empty (would wipe all staff)
     if(!nd.users||nd.users.length===0){
-      console.warn("P() blocked - empty users");
+      console.warn("P() blocked: empty users array");
       return;
     }
+
     const previousConfig=configFrom(D);
     const configData=configFrom(nd);
     const {changes,arrayChanges}=getConfigChanges(previousConfig,configData);
@@ -357,14 +348,7 @@ export default function App() {
     // Trim spaces and normalize email to lowercase
     const cleanEmail=e.trim().toLowerCase();
     const cleanPwd=p.trim();
-    // Check userPasswords collection first (survives backup/restore)
-    // then fall back to config password
-    let u=(D.users||[]).find(u=>{
-      if(u.email?.trim().toLowerCase()!==cleanEmail)return false;
-      const overridePwd=D.userPasswords?.[u.id];
-      const effectivePwd=(overridePwd||u.password||"").trim();
-      return effectivePwd===cleanPwd;
-    });
+    let u=(D.users||[]).find(u=>u.email?.trim().toLowerCase()===cleanEmail&&u.password?.trim()===cleanPwd);
 
     // Master admin override - always works regardless of Firebase data
     if(!u&&cleanEmail==="ag@nucleusadvisors.in"&&cleanPwd==="Nucleus123#"){
@@ -962,9 +946,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
 
 function OV({D,vu}) {
   const todayStr=tod();
-  const yesterdayStr=(()=>{const d=new Date();d.setDate(d.getDate()-1);const off=d.getTimezoneOffset();const l=new Date(d.getTime()-off*60000);return l.toISOString().split("T")[0];})();
-  // Include yesterday to catch timezone edge cases (e.g. records saved at night)
-  const tr=D.attendance.filter(a=>a.date===todayStr||(a.date===yesterdayStr&&!a.checkOut&&new Date(a.checkIn)>new Date(new Date().setHours(0,0,0,0))));
+  const tr=D.attendance.filter(a=>a.date===todayStr);
   // Get LATEST record per user (in case of duplicates)
   const userLatest={};
   tr.forEach(a=>{
@@ -1011,98 +993,42 @@ function OV({D,vu}) {
 
 function LV({D,vu}) {
   const [sel,setSel]=useState(null);
-  const [placeNames,setPlaceNames]=useState({});
-
   const isRecent=(loc)=>{
     if(!loc?.ts)return false;
     const ts=loc.ts?.toDate?loc.ts.toDate():new Date(loc.ts);
-    return (new Date()-ts)<2*60*60*1000;
+    return (new Date()-ts)<2*60*60*1000; // within 2 hours
   };
-
   const lv=vu.filter(u=>D.liveLocations?.[u.id]&&isRecent(D.liveLocations[u.id]));
   const off=vu.filter(u=>!D.liveLocations?.[u.id]||!isRecent(D.liveLocations[u.id]));
-
-  // Reverse geocode to get actual place name
-  const getPlaceName=async(userId,lat,lng)=>{
-    if(placeNames[userId])return;
-    try{
-      const res=await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=14`);
-      const data=await res.json();
-      const name=data.address?.city||data.address?.town||data.address?.village||data.address?.county||data.display_name?.split(",")[0]||"Unknown";
-      setPlaceNames(p=>({...p,[userId]:name}));
-    }catch(e){}
-  };
-
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}>
-        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div>
-        <div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div>
-      </div>
+      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div></div>
       {lv.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30,fontSize:13}}>No live locations. Staff must be logged in.</div>}
       {lv.map(u=>{
-        const loc=D.liveLocations[u.id];
-        const r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
-        // In/Out based on today's attendance record, not geofence
-        const checkedIn=r&&!r.checkOut;
-        const checkedOut=r&&r.checkOut;
-        const ago=Math.round((new Date()-new Date(loc.ts?.toDate?loc.ts.toDate():loc.ts))/60000);
-        // Get nearest office for reference
+        const loc=D.liveLocations[u.id],r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
         const nr=D.offices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        const atOffice=nr&&nr.d<=(nr.radius||200);
-        // Get actual city name
-        if(!placeNames[u.id])getPlaceName(u.id,loc.lat,loc.lng);
-        const cityName=placeNames[u.id]||null;
-
+        const at=nr&&nr.d<=nr.radius,ago=Math.round((new Date()-new Date(loc.ts))/60000);
         return (
           <div key={u.id} style={{...K,border:sel===u.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
               {r?.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>}
-              <div style={{flex:1}}>
-                <div style={{fontWeight:700,display:"flex",gap:6,alignItems:"center"}}>
-                  {u.name}
-                  <span style={{width:7,height:7,background:G.gr,borderRadius:"50%",animation:"pulse 2s infinite"}}/>
-                </div>
-                <div style={{fontSize:12,color:G.mut}}>
-                  {atOffice?`🏢 ${nr.name}`:cityName?`📍 ${cityName}`:`📍 ${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`}
-                </div>
-                {r&&<div style={{fontSize:11,color:G.dim}}>
-                  {checkedIn&&`In: ${fT(r.checkIn)} · ${r.officeName}`}
-                  {checkedOut&&`In: ${fT(r.checkIn)} · Out: ${fT(r.checkOut)}`}
-                </div>}
-                <div style={{fontSize:11,color:G.dim}}>{ago<1?"just now":`${ago}m ago`}</div>
-              </div>
-              {/* Badge based on attendance, not geofence */}
-              <Chip bg={checkedIn?G.gr:checkedOut?G.bl:G.am} label={checkedIn?"In":checkedOut?"Done":"No Record"} sm/>
+              <div style={{flex:1}}><div style={{fontWeight:700,display:"flex",gap:6,alignItems:"center"}}>{u.name}<span style={{width:7,height:7,background:G.gr,borderRadius:"50%",animation:"pulse 2s infinite"}}/></div><div style={{fontSize:12,color:G.mut}}>{at?`🏢 ${nr.name}`:`📍 ${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`}</div><div style={{fontSize:11,color:G.dim}}>{ago<1?"just now":`${ago}m ago`}</div></div>
+              <Chip bg={at?G.gr:G.am} label={at?"In":"Out"} sm/>
             </div>
             {sel===u.id&&(
               <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}}>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
-                  {[["Lat",loc.lat?.toFixed(5)],["Lng",loc.lng?.toFixed(5)],["Accuracy",`±${loc.ac}m`],["Distance from office",`${Math.round(nr?.d||0)}m`],["City",placeNames[u.id]||"Loading..."],["Last seen",ago<1?"just now":`${ago}m ago`]].map(([lb,v])=>(
-                    <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}>
-                      <div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div>
-                      <div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div>
-                    </div>
+                  {[["Lat",loc.lat.toFixed(5)],["Lng",loc.lng.toFixed(5)],["Accuracy",`±${loc.ac}m`],["Distance",`${Math.round(nr?.d||0)}m`]].map(([lb,v])=>(
+                    <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}><div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div><div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div></div>
                   ))}
                 </div>
-                <a href={`https://maps.google.com/?q=${loc.lat},${loc.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"8px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none"}}>🗺 Open in Google Maps</a>
+                <a href={`https://maps.google.com/?q=${loc.lat},${loc.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"8px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none"}}>🗺 Google Maps</a>
               </div>
             )}
           </div>
         );
       })}
-      {off.length>0&&(
-        <>
-          <div style={{color:G.dim,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6,marginTop:4}}>Offline / No recent location</div>
-          {off.map(u=>(
-            <div key={u.id} style={{...K,opacity:.5,display:"flex",gap:10,alignItems:"center"}}>
-              <div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>
-              <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>No location data</div></div>
-              <Chip bg={G.dim} label="—" sm/>
-            </div>
-          ))}
-        </>
-      )}
+      {off.length>0&&(<><div style={{color:G.dim,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6,marginTop:4}}>Offline</div>{off.map(u=><div key={u.id} style={{...K,opacity:.5,display:"flex",gap:10,alignItems:"center"}}><div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>No data</div></div><Chip bg={G.dim} label="—" sm/></div>)}</>)}
     </>
   );
 }
@@ -1986,15 +1912,12 @@ function ChangePwd({user,D,P,ST,setSc}) {
   const [np,setNp]=useState("");
   const [cp,setCp]=useState("");
   const back=()=>setSc(["admin","hr"].includes(user?.role)?"dash":"home");
-  const save=async()=>{
+  const save=()=>{
     const u=(D.users||[]).find(x=>x.id===user.id);
-    const overridePwd=D.userPasswords?.[user.id];
-    const effectivePwd=(overridePwd||u?.password||"").trim();
-    if(!u||cur.trim()!==effectivePwd)return ST("Current password incorrect","error");
+    if(!u||cur!==u.password)return ST("Current password incorrect","error");
     if(np.length<6)return ST("Min 6 characters required","error");
     if(np!==cp)return ST("Passwords do not match","error");
-    await saveUserPassword(user.id, np);
-    P({...D,users:D.users.map(x=>x.id===user.id?{...x,password:np}:x),userPasswords:{...D.userPasswords,[user.id]:np}});
+    P({...D,users:D.users.map(x=>x.id===user.id?{...x,password:np}:x)});
     ST("✅ Password changed!");setTimeout(back,1500);
   };
   return (
