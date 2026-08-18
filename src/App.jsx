@@ -538,6 +538,10 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,
       status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh};
     try{
+      // Update live location with check-in GPS so admin sees current location
+      if(gps){
+        updateLiveLocation(user.id,{lat:gps.lat,lng:gps.lng,ac:gps.ac||0,ts:new Date().toISOString()});
+      }
       await addAttendance(rec2);
       let msg="✅ Checked in!";
       if(wfh)msg="🏠 WFH check-in done!";
@@ -558,6 +562,10 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     const checkOutTime=new Date().toISOString();
     const go=async(cg)=>{
       try{
+        // Update live location on checkout too
+        if(cg){
+          updateLiveLocation(user.id,{lat:cg.lat,lng:cg.lng,ac:0,ts:checkOutTime});
+        }
         await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg});
         notifyCheckout(user, fT(checkOutTime), wHr(rec.checkIn,checkOutTime)||"");
         ST("👋 Checked out successfully!");
@@ -993,42 +1001,93 @@ function OV({D,vu}) {
 
 function LV({D,vu}) {
   const [sel,setSel]=useState(null);
-  const isRecent=(loc)=>{
-    if(!loc?.ts)return false;
+  const [placeNames,setPlaceNames]=useState({});
+
+  const getAge=(loc)=>{
+    if(!loc?.ts)return 9999;
     const ts=loc.ts?.toDate?loc.ts.toDate():new Date(loc.ts);
-    return (new Date()-ts)<2*60*60*1000; // within 2 hours
+    return Math.round((new Date()-ts)/60000); // age in minutes
   };
+
+  const isRecent=(loc)=>getAge(loc)<720; // within 12 hours
+
   const lv=vu.filter(u=>D.liveLocations?.[u.id]&&isRecent(D.liveLocations[u.id]));
   const off=vu.filter(u=>!D.liveLocations?.[u.id]||!isRecent(D.liveLocations[u.id]));
+
+  const getPlaceName=async(userId,lat,lng)=>{
+    if(placeNames[userId])return;
+    try{
+      const res=await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`);
+      const data=await res.json();
+      const name=data.address?.city||data.address?.town||data.address?.village||data.address?.state_district||data.address?.state||"Unknown";
+      setPlaceNames(p=>({...p,[userId]:name}));
+    }catch(e){}
+  };
+
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div></div>
-      {lv.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30,fontSize:13}}>No live locations. Staff must be logged in.</div>}
+      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div>
+      </div>
+      {lv.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30,fontSize:13}}>No live locations. Staff must be logged in with app open.</div>}
       {lv.map(u=>{
-        const loc=D.liveLocations[u.id],r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
+        const loc=D.liveLocations[u.id];
+        const r=D.attendance.find(a=>a.userId===u.id&&a.date===tod());
+        const checkedIn=r&&!r.checkOut;
+        const checkedOut=r&&r.checkOut;
+        const ageMin=getAge(loc);
+        const isStale=ageMin>30;
         const nr=D.offices.reduce((b,o)=>{const d=dist(loc.lat,loc.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        const at=nr&&nr.d<=nr.radius,ago=Math.round((new Date()-new Date(loc.ts))/60000);
+        const atOffice=nr&&nr.d<=(nr.radius||200);
+        if(!placeNames[u.id])getPlaceName(u.id,loc.lat,loc.lng);
+        const cityName=placeNames[u.id];
+
         return (
           <div key={u.id} style={{...K,border:sel===u.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
               {r?.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>}
-              <div style={{flex:1}}><div style={{fontWeight:700,display:"flex",gap:6,alignItems:"center"}}>{u.name}<span style={{width:7,height:7,background:G.gr,borderRadius:"50%",animation:"pulse 2s infinite"}}/></div><div style={{fontSize:12,color:G.mut}}>{at?`🏢 ${nr.name}`:`📍 ${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`}</div><div style={{fontSize:11,color:G.dim}}>{ago<1?"just now":`${ago}m ago`}</div></div>
-              <Chip bg={at?G.gr:G.am} label={at?"In":"Out"} sm/>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,display:"flex",gap:6,alignItems:"center"}}>
+                  {u.name}
+                  <span style={{width:7,height:7,background:isStale?G.am:G.gr,borderRadius:"50%",animation:isStale?"none":"pulse 2s infinite"}}/>
+                </div>
+                <div style={{fontSize:12,color:isStale?G.am:G.mut}}>
+                  {atOffice?`🏢 ${nr.name}`:cityName?`📍 ${cityName}`:`📍 ${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`}
+                  {isStale&&<span style={{fontSize:10,marginLeft:4}}>⚠️ {ageMin<60?`${ageMin}m`:`${Math.floor(ageMin/60)}h`} ago — may be stale</span>}
+                </div>
+                {r&&<div style={{fontSize:11,color:G.dim}}>{checkedIn?`In: ${fT(r.checkIn)} · ${r.officeName}`:checkedOut?`In: ${fT(r.checkIn)} · Out: ${fT(r.checkOut)}`:""}</div>}
+              </div>
+              <Chip bg={checkedIn?G.gr:checkedOut?G.bl:G.am} label={checkedIn?"In":checkedOut?"Done":"No Record"} sm/>
             </div>
             {sel===u.id&&(
               <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}}>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
-                  {[["Lat",loc.lat.toFixed(5)],["Lng",loc.lng.toFixed(5)],["Accuracy",`±${loc.ac}m`],["Distance",`${Math.round(nr?.d||0)}m`]].map(([lb,v])=>(
-                    <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}><div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div><div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div></div>
+                  {[["Lat",loc.lat?.toFixed(5)],["Lng",loc.lng?.toFixed(5)],["Accuracy",`±${loc.ac||"?"}m`],["City",cityName||"Loading..."],["Last updated",ageMin<1?"just now":ageMin<60?`${ageMin}m ago`:`${Math.floor(ageMin/60)}h ago`],["Office dist",`${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`]].map(([lb,v])=>(
+                    <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}>
+                      <div style={{fontSize:9,color:G.dim,fontWeight:700,textTransform:"uppercase"}}>{lb}</div>
+                      <div style={{fontSize:12,color:G.txt,fontWeight:600,marginTop:1}}>{v}</div>
+                    </div>
                   ))}
                 </div>
-                <a href={`https://maps.google.com/?q=${loc.lat},${loc.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"8px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none"}}>🗺 Google Maps</a>
+                <a href={`https://maps.google.com/?q=${loc.lat},${loc.lng}`} target="_blank" rel="noreferrer" style={{display:"block",background:G.bl,color:"#fff",textAlign:"center",padding:"8px",borderRadius:8,fontSize:12,fontWeight:700,textDecoration:"none"}}>🗺 Open in Google Maps</a>
               </div>
             )}
           </div>
         );
       })}
-      {off.length>0&&(<><div style={{color:G.dim,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6,marginTop:4}}>Offline</div>{off.map(u=><div key={u.id} style={{...K,opacity:.5,display:"flex",gap:10,alignItems:"center"}}><div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>No data</div></div><Chip bg={G.dim} label="—" sm/></div>)}</>)}
+      {off.length>0&&(
+        <>
+          <div style={{color:G.dim,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6,marginTop:4}}>Offline / No recent location</div>
+          {off.map(u=>(
+            <div key={u.id} style={{...K,opacity:.5,display:"flex",gap:10,alignItems:"center"}}>
+              <div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>
+              <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>No location data</div></div>
+              <Chip bg={G.dim} label="—" sm/>
+            </div>
+          ))}
+        </>
+      )}
     </>
   );
 }
