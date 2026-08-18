@@ -140,6 +140,15 @@ export const saveBackup = async (data) => {
       userCount: data.users.length
     });
     console.log('✅ Backup saved:', key, 'Users:', data.users.length);
+    // Auto-cleanup: keep only last 30 backups
+    const all = await getDocs(collection(db, 'backups'));
+    const sorted = all.docs
+      .map(d => ({ id: d.id, at: d.data().backedUpAt || '' }))
+      .sort((a,b) => b.at.localeCompare(a.at));
+    if (sorted.length > 30) {
+      const toDelete = sorted.slice(30);
+      await Promise.all(toDelete.map(b => deleteDoc(doc(db, 'backups', b.id))));
+    }
   } catch(e) {
     console.warn('Backup failed:', e.message);
   }
@@ -176,7 +185,7 @@ export const restoreBackup = async (backupId) => {
   }
 };
 
-// ── Comp Off Work Approvals ───────────────────────────────────────
+// ── Work Approvals ────────────────────────────────────────────────
 export const addWorkApproval = async (rec) => {
   await setDoc(doc(db, 'workApprovals', rec.id), { ...rec, updatedAt: serverTimestamp() });
 };
@@ -188,7 +197,7 @@ export const onWorkApprovals = (cb) => onSnapshot(
   snap => cb(snap.docs.map(d => d.data()))
 );
 
-// ── Comp Off Credits ──────────────────────────────────────────────
+// ── Comp Offs ─────────────────────────────────────────────────────
 export const addCompOff = async (rec) => {
   await setDoc(doc(db, 'compoffs', rec.id), { ...rec, updatedAt: serverTimestamp() });
 };
@@ -199,3 +208,37 @@ export const onCompOffs = (cb) => onSnapshot(
   collection(db, 'compoffs'),
   snap => cb(snap.docs.map(d => d.data()))
 );
+
+// ── Backup cleanup ────────────────────────────────────────────────
+export const cleanupBackups = async () => {
+  try {
+    const all = await getDocs(collection(db, 'backups'));
+    const sorted = all.docs
+      .map(d => ({ id: d.id, at: d.data().backedUpAt || '' }))
+      .sort((a,b) => b.at.localeCompare(a.at));
+    if (sorted.length > 30) {
+      const toDelete = sorted.slice(30);
+      await Promise.all(toDelete.map(b => deleteDoc(doc(db, 'backups', b.id))));
+      return toDelete.length;
+    }
+    return 0;
+  } catch(e) {
+    console.warn('Cleanup failed:', e.message);
+    return 0;
+  }
+};
+
+// ── User Passwords (separate from config so restores don't affect them) ──
+export const saveUserPassword = async (userId, password) => {
+  await setDoc(doc(db, 'userPasswords', userId), {
+    userId, password, updatedAt: serverTimestamp()
+  });
+};
+export const getUserPasswords = async () => {
+  try {
+    const snap = await getDocs(collection(db, 'userPasswords'));
+    const map = {};
+    snap.docs.forEach(d => { map[d.id] = d.data().password; });
+    return map;
+  } catch(e) { return {}; }
+};
