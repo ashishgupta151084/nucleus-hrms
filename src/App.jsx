@@ -961,7 +961,10 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
 }
 
 function OV({D,vu}) {
-  const tr=D.attendance.filter(a=>a.date===tod());
+  const todayStr=tod();
+  const yesterdayStr=(()=>{const d=new Date();d.setDate(d.getDate()-1);const off=d.getTimezoneOffset();const l=new Date(d.getTime()-off*60000);return l.toISOString().split("T")[0];})();
+  // Include yesterday to catch timezone edge cases (e.g. records saved at night)
+  const tr=D.attendance.filter(a=>a.date===todayStr||(a.date===yesterdayStr&&!a.checkOut&&new Date(a.checkIn)>new Date(new Date().setHours(0,0,0,0))));
   // Get LATEST record per user (in case of duplicates)
   const userLatest={};
   tr.forEach(a=>{
