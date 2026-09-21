@@ -13,10 +13,10 @@ import {
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
 const CONFIG_FIELDS = [
-  "users", "offices", "teams", "branches", "leavePolicy", "holidays",
+  "users", "offices", "teams", "branches", "leavePolicy", "holidays", "holidayCalendars",
   "companyName", "firmId", "firmPlan", "firmTrial"
 ];
-const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays"]);
+const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays", "holidayCalendars"]);
 
 const configFrom = data => clean({
   users: data.users || [],
@@ -25,6 +25,7 @@ const configFrom = data => clean({
   branches: data.branches || [],
   leavePolicy: data.leavePolicy || null,
   holidays: data.holidays || [],
+  holidayCalendars: data.holidayCalendars || [],
   companyName: data.companyName || "Nucleus HRMS",
   firmId: data.firmId || null,
   firmPlan: data.firmPlan || null,
@@ -146,6 +147,31 @@ const isWE=(ds,weeklyOff="sun_sat")=>{
   return false;
 };
 const isDayOff=(ds,hs,weeklyOff)=>isWE(ds,weeklyOff)||isHL(ds,hs);
+
+// ── Holiday calendars ──────────────────────────────────────────────
+// A firm keeps several calendars (head office, each client location).
+// Holidays and staff both carry a calendarId; anything without one
+// falls back to the default calendar so older records keep working.
+const DEFAULT_CAL="cal_default";
+const calsOf=D=>{
+  const list=D.holidayCalendars||[];
+  return list.length?list:[{id:DEFAULT_CAL,name:D.companyName||"Nucleus"}];
+};
+const calIdOf=user=>user?.calendarId||DEFAULT_CAL;
+// Holidays that apply to one person
+const holsFor=(D,user)=>{
+  const cid=calIdOf(user);
+  return (D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)===cid);
+};
+// Every date string in a month
+const daysOfMonth=(y,m)=>{
+  const out=[],last=new Date(y,m,0).getDate();
+  for(let d=1;d<=last;d++) out.push(`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`);
+  return out;
+};
+// Payable working days: excludes this person's weekly offs and their calendar's holidays
+const workingDaysFor=(y,m,hols,weeklyOff)=>
+  daysOfMonth(y,m).filter(ds=>!isDayOff(ds,hols,weeklyOff)).length;
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
@@ -153,6 +179,9 @@ const DP_EMP={casual:12,sick:12,compoff:6,halfday:24,early:12};
 const DP_AA={sick:12,casual:0,compoff:0,halfday:0,early:0,studyleave:12};
 const DP={employee:DP_EMP,articled:DP_AA};
 const GRACE_MINS=15;
+// SaaS features (trial countdown, plan limits, upgrade prompts).
+// OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
+const SAAS_MODE=false;
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -186,15 +215,16 @@ const SEED={
     {id:"u4",name:"Amit Singh",email:"amit@nucleusadvisors.in",password:"pass123",role:"staff",employeeType:"articled",teamId:"t2",officeIds:["o1","o2"],customShift:{shiftStart:"10:00",shiftEnd:"19:00"}},
   ],
   attendance:[],leaves:[],liveLocations:{},leavePolicy:{employee:DP_EMP,articled:DP_AA},
-  holidays:[{id:"h1",date:"2026-01-26",name:"Republic Day"},{id:"h2",date:"2026-08-15",name:"Independence Day"},{id:"h3",date:"2026-10-02",name:"Gandhi Jayanti"},{id:"h4",date:"2026-11-08",name:"Diwali"},{id:"h5",date:"2026-12-25",name:"Christmas"}],
+  holidayCalendars:[{id:"cal_default",name:"Nucleus"}],
+  holidays:[{id:"h1",date:"2026-01-26",name:"Republic Day",calendarId:"cal_default"},{id:"h2",date:"2026-08-15",name:"Independence Day",calendarId:"cal_default"},{id:"h3",date:"2026-10-02",name:"Gandhi Jayanti",calendarId:"cal_default"},{id:"h4",date:"2026-11-08",name:"Diwali",calendarId:"cal_default"},{id:"h5",date:"2026-12-25",name:"Christmas",calendarId:"cal_default"}],
   notifications:[],regularizations:[],
 };
 
-const G={bg:"#0a0f1e",card:"#111827",card2:"#1a2235",bdr:"#1e3a5f",gold:"#c9a84c",goldL:"#e8c97a",goldD:"#a07830",navy:"#0d1f3c",navyL:"#1a3a6b",txt:"#e8dcc8",mut:"#8a9bb5",dim:"#4a5a72",gr:"#10b981",rd:"#ef4444",am:"#f59e0b",bl:"#3b82f6",pu:"#8b5cf6"};
+const G={bg:"#f5f7fb",card:"#ffffff",card2:"#eef1f7",bdr:"#dfe4ee",gold:"#E31E24",goldL:"#ff5a5f",goldD:"#b01419",navy:"#1B2A5E",navyL:"#2f4585",txt:"#1B2A5E",mut:"#5a6b91",dim:"#8a97b5",gr:"#0f9d58",rd:"#d93025",am:"#e8890c",bl:"#1a73e8",pu:"#7b3ff2"};
 const B=(bg,x={})=>({background:bg,color:"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
-const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:G.navy,color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
+const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:"#fff",color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
 const L={fontSize:11,color:G.mut,marginBottom:4,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
-const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12};
+const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12,boxShadow:"0 1px 3px rgba(27,42,94,0.06)"};
 
 const Chip=({bg,label,sm})=>(
   <span style={{background:bg,color:"#fff",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
@@ -204,12 +234,7 @@ const FRow=({label,children})=>(
 );
 
 const Logo=({s=32})=>(
-  <svg width={s} height={s} viewBox="0 0 40 40" fill="none">
-    <circle cx="20" cy="20" r="18" stroke={G.gold} strokeWidth="2.5" fill="none"/>
-    <circle cx="20" cy="20" r="6" fill={G.gold}/>
-    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(45 20 20)"/>
-    <ellipse cx="20" cy="20" rx="18" ry="7" stroke={G.goldL} strokeWidth="1.5" fill="none" transform="rotate(-45 20 20)"/>
-  </svg>
+  <img src="/logo.png" alt="Nucleus" style={{height:s,width:"auto",display:"block"}}/>
 );
 const Msg=({t})=>(
   <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:t.type==="error"?G.rd:G.gr,color:"#fff",padding:"12px 24px",borderRadius:12,fontWeight:700,fontSize:14,zIndex:9999,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",whiteSpace:"nowrap",border:`1px solid ${G.gold}`}}>
@@ -237,7 +262,7 @@ function Cam({onDone,onCancel}) {
       <div style={{fontSize:36}}>📷</div>
       <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{err}</p>
       <div style={{display:"flex",gap:8,flexDirection:"column"}}>
-        <button onClick={()=>{setErr(null);navigator.mediaDevices?.getUserMedia({video:{facingMode:"user"}}).then(s=>{sr.current=s;if(vr.current){vr.current.srcObject=s;setOk(true);}}).catch(()=>setErr("Camera still unavailable."));}} style={{...B(G.gold),color:"#000",fontWeight:700}}>🔄 Retry Camera</button>
+        <button onClick={()=>{setErr(null);navigator.mediaDevices?.getUserMedia({video:{facingMode:"user"}}).then(s=>{sr.current=s;if(vr.current){vr.current.srcObject=s;setOk(true);}}).catch(()=>setErr("Camera still unavailable."));}} style={{...B(G.gold),color:"#fff",fontWeight:700}}>🔄 Retry Camera</button>
         <button onClick={()=>onDone(null)} style={{...B(G.bl)}}>Continue Without Selfie</button>
         <button onClick={onCancel} style={B(G.dim)}>Back</button>
       </div>
@@ -252,7 +277,7 @@ function Cam({onDone,onCancel}) {
       <canvas ref={cr} style={{display:"none"}}/>
       <div style={{display:"flex",gap:10,width:"100%"}}>
         <button onClick={onCancel} style={{...B(G.dim),flex:1}}>Cancel</button>
-        <button onClick={snap} disabled={!ok} style={{...B(ok?G.gold:"#555"),flex:2,color:ok?"#000":"#fff"}}>📸 Take Selfie</button>
+        <button onClick={snap} disabled={!ok} style={{...B(ok?G.gold:"#555"),flex:2,color:"#fff"}}>📸 Take Selfie</button>
       </div>
     </div>
   );
@@ -379,7 +404,7 @@ export default function App() {
 
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.navyL};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.dim};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
       {sc==="login"&&<Login login={login} name={D.companyName} setSc={setSc} D={D}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
@@ -403,17 +428,17 @@ export default function App() {
 function Login({login,name,setSc,D}) {
   const [e,setE]=useState(""),[p,setP]=useState("");
   return (
-    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(135deg,${G.bg},${G.navy})`}}>
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,background:`linear-gradient(160deg,#ffffff,${G.bg})`}}>
       <div style={{width:"100%",maxWidth:400}}>
         <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:10}}><Logo s={48}/><div style={{textAlign:"left"}}><div style={{fontSize:22,fontWeight:900,color:G.gold}}>Nucleus Advisors</div><div style={{fontSize:11,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.1em"}}>HR Management System</div></div></div>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:10}}><Logo s={56}/><div style={{textAlign:"left"}}><div style={{fontSize:11,color:G.mut,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.1em"}}>HR Management System</div></div></div>
           <div style={{width:80,height:2,background:`linear-gradient(90deg,transparent,${G.gold},transparent)`,margin:"0 auto"}}/>
         </div>
         <div style={{...K,padding:24,marginBottom:12}}>
           <FRow label="Email"><input style={I} type="email" value={e} onChange={x=>setE(x.target.value)} placeholder="you@nucleusadvisors.in"/></FRow>
           <FRow label="Password"><input style={I} type="password" value={p} onChange={x=>setP(x.target.value)} placeholder="••••••••" onKeyDown={x=>x.key==="Enter"&&login(e,p)}/></FRow>
           {!D?.loaded&&<div style={{textAlign:"center",marginBottom:8,fontSize:12,color:G.am}}>⏳ Connecting to server… please wait</div>}
-          <button onClick={()=>login(e,p)} style={{...B(!D?.loaded?"#555":`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:D?.loaded?"#000":"#888",fontWeight:800}}>{D?.loaded?"Sign In →":"⏳ Loading…"}</button>
+          <button onClick={()=>login(e,p)} style={{...B(!D?.loaded?"#555":`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:D?.loaded?"#fff":"#eee",fontWeight:800}}>{D?.loaded?"Sign In →":"⏳ Loading…"}</button>
         </div>
 
         <div style={{textAlign:"center",marginTop:8}}>
@@ -458,7 +483,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const tm=D.teams.find(t=>t.id===user.teamId);
   const sh=user.customShift||(tm?{shiftStart:tm.shiftStart,shiftEnd:tm.shiftEnd}:null);
   const pl=(D.leaves||[]).filter(l=>l.userId===user.id&&l.status==="pending").length;
-  const hol=isHL(tod(),D.holidays)?(D.holidays||[]).find(h=>h.date===tod())?.name:null;
+  const myHols=holsFor(D,user);
+  const hol=isHL(tod(),myHols)?myHols.find(h=>h.date===tod())?.name:null;
   const now=new Date();
   const onSelfie=img=>{
     setSelfie(img);
@@ -581,8 +607,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}><Logo s={28}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>Nucleus Advisors</div><div style={{fontSize:16,fontWeight:800}}>{user.name}</div></div></div>
-        {D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#000",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
+        <div style={{display:"flex",alignItems:"center",gap:10}}><Logo s={28}/><div><div style={{fontSize:16,fontWeight:800}}>{user.name}</div></div></div>
+        {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setSc("notif")} style={{...B(G.card),padding:"8px 11px",border:`1px solid ${G.bdr}`,fontSize:13,position:"relative"}}>{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:15,height:15,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{unread}</span>}🔔</button>
           <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Out</button>
@@ -605,10 +631,10 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
             {step==="idle"&&(
               <>
                 <div style={{display:"flex",gap:8,marginBottom:10}}>
-                  <button onClick={()=>setWfh(false)} style={{...B(wfh?G.card2:G.gold),flex:1,fontSize:13,color:wfh?"#fff":"#000",border:wfh?`1px solid ${G.bdr}`:"none"}}>🏢 Office</button>
+                  <button onClick={()=>setWfh(false)} style={{...B(wfh?G.card2:G.gold),flex:1,fontSize:13,color:"#fff",border:wfh?`1px solid ${G.bdr}`:"none"}}>🏢 Office</button>
                   <button onClick={()=>setWfh(true)} style={{...B(!wfh?G.card2:G.bl),flex:1,fontSize:13,border:!wfh?`1px solid ${G.bdr}`:"none"}}>🏠 WFH</button>
                 </div>
-                <button onClick={()=>setStep("cam")} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:13,color:"#000",fontWeight:800}}>📸 Check In{wfh?" (WFH)":""}</button>
+                <button onClick={()=>setStep("cam")} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:13,color:"#fff",fontWeight:800}}>📸 Check In{wfh?" (WFH)":""}</button>
               </>
             )}
             {step==="cam"&&<Cam onDone={onSelfie} onCancel={()=>setStep("idle")}/>}
@@ -618,14 +644,14 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                 {selfie&&<img src={selfie} style={{width:90,height:90,borderRadius:"50%",objectFit:"cover",border:`4px solid ${G.gold}`,marginBottom:10}}/>}
                 <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>{wfh?"🏠 Work From Home":`📍 ${office?.name}`}</div>
                 <div style={{color:G.mut,fontSize:12,marginBottom:12}}>{wfh?"WFH":"Location verified ✓"}</div>
-                <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Confirm Check-In ✓</button>
+                <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Confirm Check-In ✓</button>
               </div>
             )}
             {step==="err"&&<div style={{textAlign:"center",padding:8}}>
               <div style={{fontSize:32,marginBottom:8}}>🚫</div>
               <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                <button onClick={()=>setStep("idle")} style={{...B(G.gold),color:"#000",fontWeight:700}}>🔄 Try Again</button>
+                <button onClick={()=>setStep("idle")} style={{...B(G.gold),color:"#fff",fontWeight:700}}>🔄 Try Again</button>
                 <button onClick={()=>{setWfh(true);setStep("idle");}} style={B(G.bl)}>🏠 Switch to WFH</button>
               </div>
             </div>}
@@ -692,7 +718,8 @@ function Hist({user,D,setSc}) {
     for(let d=new Date(s);d<=e;d.setDate(d.getDate()+1)){leaveMap[d.toISOString().split("T")[0]]=l;}
   });
   const uWeeklyOff=user.weeklyOff||"sun_sat";
-  const workDays=allDays.filter(ds=>!isDayOff(ds,D.holidays,uWeeklyOff));
+  const uHols=holsFor(D,user);
+  const workDays=allDays.filter(ds=>!isDayOff(ds,uHols,uWeeklyOff));
   const present=workDays.filter(ds=>attMap[ds]&&(attMap[ds].status==="present"||attMap[ds].status==="wfh")).length;
   const late=workDays.filter(ds=>attMap[ds]&&attMap[ds].status==="late").length;
   const absent=workDays.filter(ds=>!attMap[ds]&&!leaveMap[ds]).length;
@@ -700,8 +727,8 @@ function Hist({user,D,setSc}) {
   const total=workDays.length;
   const pct=total?Math.round(((present+late)/total)*100):0;
   const getInfo=(ds)=>{
-    const rec=attMap[ds],lv=leaveMap[ds],we=isWE(ds),hl=isHL(ds,D.holidays);
-    const hlName=(D.holidays||[]).find(h=>h.date===ds)?.name;
+    const rec=attMap[ds],lv=leaveMap[ds],we=isWE(ds,uWeeklyOff),hl=isHL(ds,uHols);
+    const hlName=uHols.find(h=>h.date===ds)?.name;
     if(rec){const sb={present:[G.gr,"✅","Present"],late:[G.am,"⚠️","Late"],wfh:[G.bl,"🏠","WFH"]};return sb[rec.status]||[G.gr,"✅","Present"];}
     if(lv) return [G.pu,"🏖","On Leave"];
     if(hl) return [G.gold,"🎉",hlName||"Holiday"];
@@ -737,7 +764,7 @@ function Hist({user,D,setSc}) {
         :allDays.map(ds=>{
           const rec=attMap[ds];
           const [stColor,stIcon,stLabel]=getInfo(ds);
-          const we=isWE(ds),hl=isHL(ds,D.holidays);
+          const we=isWE(ds,uWeeklyOff),hl=isHL(ds,uHols);
           const dayNum=new Date(ds).getDate();
           const dayName=new Date(ds).toLocaleDateString([],{weekday:"short"});
           return (
@@ -810,8 +837,8 @@ function Lv({user,D,P,ST,setSc}) {
         {form.type==="halfday"&&(
           <FRow label="Half Day Session">
             <div style={{display:"flex",gap:8}}>
-              <button type="button" onClick={()=>setForm({...form,session:"morning"})} style={{...B(form.session==="morning"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="morning"?"#000":"#fff",border:form.session==="morning"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌅 Morning</button>
-              <button type="button" onClick={()=>setForm({...form,session:"afternoon"})} style={{...B(form.session==="afternoon"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="afternoon"?"#000":"#fff",border:form.session==="afternoon"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌇 Afternoon</button>
+              <button type="button" onClick={()=>setForm({...form,session:"morning"})} style={{...B(form.session==="morning"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="morning"?"#fff":G.mut,border:form.session==="morning"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌅 Morning</button>
+              <button type="button" onClick={()=>setForm({...form,session:"afternoon"})} style={{...B(form.session==="afternoon"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="afternoon"?"#fff":G.mut,border:form.session==="afternoon"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌇 Afternoon</button>
             </div>
           </FRow>
         )}
@@ -821,7 +848,7 @@ function Lv({user,D,P,ST,setSc}) {
           :<div style={{display:"flex",gap:8}}><FRow label="From"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value})}/></FRow><FRow label="To"><input type="date" style={I} value={form.to} onChange={e=>setForm({...form,to:e.target.value})}/></FRow></div>
         }
         <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:65}} value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})} placeholder="Reason…"/></FRow>
-        <button onClick={apply} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Apply Leave</button>
+        <button onClick={apply} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Apply Leave</button>
       </div>
       {myL.map(l=>(
         <div key={l.id} style={K}>
@@ -877,7 +904,7 @@ function Reg({user,D,P,ST,setSc}) {
         <h2 style={{margin:0,fontSize:17,fontWeight:800,color:G.gold}}>Regularization</h2>
       </div>
       <div style={K}>
-        <div style={{background:remReg===0?"#1a0000":"#001a0f",border:`1px solid ${remReg===0?G.rd:G.gr}`,borderRadius:10,padding:"8px 12px",marginBottom:12}}>
+        <div style={{background:remReg===0?"#fdecea":"#e9f7ef",border:`1px solid ${remReg===0?G.rd:G.gr}`,borderRadius:10,padding:"8px 12px",marginBottom:12}}>
           <div style={{fontSize:12,fontWeight:700,color:remReg===0?G.rd:G.gr}}>
             {remReg===0?`⚠️ No regularizations left this month`:`✅ ${remReg} of ${MAX_REG} regularizations remaining this month`}
           </div>
@@ -892,7 +919,7 @@ function Reg({user,D,P,ST,setSc}) {
         </FRow>
         <div style={{display:"flex",gap:8}}><FRow label="Check-in"><input type="time" style={I} value={f.checkIn} onChange={e=>setF({...f,checkIn:e.target.value})}/></FRow><FRow label="Check-out"><input type="time" style={I} value={f.checkOut} onChange={e=>setF({...f,checkOut:e.target.value})}/></FRow></div>
         <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:70}} value={f.reason} onChange={e=>setF({...f,reason:e.target.value})} placeholder="Why was attendance missed?"/></FRow>
-        <div style={{display:"flex",gap:8}}><button onClick={submit} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Submit</button><button onClick={()=>setSc("home")} style={{...B(G.dim),flex:1}}>Cancel</button></div>
+        <div style={{display:"flex",gap:8}}><button onClick={submit} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>Submit</button><button onClick={()=>setSc("home")} style={{...B(G.dim),flex:1}}>Cancel</button></div>
       </div>
     </div>
   );
@@ -916,7 +943,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
-        {D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#000",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
+        {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
           {isA&&<button onClick={()=>setSc("superadmin")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>⚙️</button>}
@@ -925,7 +952,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       </div>
       <div style={{display:"flex",gap:5,marginBottom:12,overflowX:"auto",paddingBottom:4}}>
         {tabs.map(([id,lb])=>(
-          <button key={id} onClick={()=>setTab(id)} style={{...B(tab===id?G.gold:G.card),whiteSpace:"nowrap",fontSize:12,padding:"7px 9px",border:tab===id?"none":`1px solid ${G.bdr}`,color:tab===id?"#000":"#fff",flexShrink:0,position:"relative",fontWeight:tab===id?800:600}}>
+          <button key={id} onClick={()=>setTab(id)} style={{...B(tab===id?G.gold:G.card),whiteSpace:"nowrap",fontSize:12,padding:"7px 9px",border:tab===id?"none":`1px solid ${G.bdr}`,color:tab===id?"#fff":G.mut,flexShrink:0,position:"relative",fontWeight:tab===id?800:600}}>
             {lb}
             {id==="lv"&&pL>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pL}</span>}
             {id==="rg"&&pR>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pR}</span>}
@@ -1241,7 +1268,7 @@ function LT({D,vu,P,ST,AN,isA}) {
     <>
       <div style={{display:"flex",gap:5,marginBottom:10,overflowX:"auto"}}>
         {[["pending",`Pending${pd>0?`(${pd})`:""}`],["approved","Approved"],["rejected","Rejected"],["all","All"]].map(([v,lb])=>(
-          <button key={v} onClick={()=>setFl(v)} style={{...B(fl===v?G.gold:G.card),fontSize:12,padding:"6px 10px",border:fl===v?"none":`1px solid ${G.bdr}`,color:fl===v?"#000":"#fff",flexShrink:0}}>{lb}</button>
+          <button key={v} onClick={()=>setFl(v)} style={{...B(fl===v?G.gold:G.card),fontSize:12,padding:"6px 10px",border:fl===v?"none":`1px solid ${G.bdr}`,color:fl===v?"#fff":G.mut,flexShrink:0}}>{lb}</button>
         ))}
       </div>
       {lvs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No {fl} leaves.</div>}
@@ -1330,7 +1357,12 @@ function PT({D,vu,ST,user}) {
   const ms=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const polAll=D.leavePolicy||{employee:DP_EMP,articled:DP_AA};
   const rows=vu.map(u=>{
-    const s=`${yr}-${String(mo).padStart(2,"0")}-01`,e=`${yr}-${String(mo).padStart(2,"0")}-${String(new Date(yr,mo,0).getDate()).padStart(2,"0")}`,wd=wDM(yr,mo);
+    const s=`${yr}-${String(mo).padStart(2,"0")}-01`,e=`${yr}-${String(mo).padStart(2,"0")}-${String(new Date(yr,mo,0).getDate()).padStart(2,"0")}`;
+    // Working days = calendar days minus this person's weekly offs and their holiday calendar
+    const uHols=holsFor(D,u);
+    const uWO=u.weeklyOff||"sun_sat";
+    const wd=workingDaysFor(yr,mo,uHols,uWO);
+    const offDays=daysOfMonth(yr,mo).length-wd;
     const pol=(polAll[u.employeeType||"employee"]||DP_EMP);
     const ar=D.attendance.filter(a=>a.userId===u.id&&a.date>=s&&a.date<=e);
     const ap=(D.leaves||[]).filter(l=>l.userId===u.id&&l.status==="approved"&&l.from>=s&&l.from<=e);
@@ -1339,11 +1371,12 @@ function PT({D,vu,ST,user}) {
     const tm=ar.reduce((s,r)=>s+wMin(r.checkIn,r.checkOut),0),am=ar.length?Math.round(tm/ar.length):0;
     const tp=pr+lt+wf,pd=Math.round((tp+(hd*.5)+cl+sl+co)*10)/10,ab=Math.max(0,wd-Math.round(pd));
     const team=D.teams.find(t=>t.id===u.teamId);
-    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",wd,pr,lt,wf,hd,cl,sl,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
+    const cal=calsOf(D).find(x=>x.id===calIdOf(u));
+    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,pr,lt,wf,hd,cl,sl,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
   const exp=()=>{
-    const h=["Name","Email","Team","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
-    const dr=rows.map(r=>[r.name,r.email,r.team,r.wd,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
+    const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
+    const dr=rows.map(r=>[r.name,r.email,r.team,r.cal,r.offDays,r.wd,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
     const csv=[h,...dr].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=`Nucleus_Payroll_${ms[mo-1]}_${yr}.csv`;a.click();ST("💰 Payroll exported!");
   };
@@ -1354,12 +1387,12 @@ function PT({D,vu,ST,user}) {
         <div style={{flex:2}}><label style={L}>Month</label><select style={I} value={mo} onChange={e=>setMo(Number(e.target.value))}>{ms.map((m,i)=><option key={i} value={i+1}>{m}</option>)}</select></div>
         <div style={{flex:1}}><label style={L}>Year</label><input type="number" style={I} value={yr} onChange={e=>setYr(Number(e.target.value))}/></div>
       </div>
-      <button onClick={exp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:12,fontSize:14,color:"#000",fontWeight:800}}>📥 Export to Excel</button>
-      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>{ms[mo-1]} {yr} — {wDM(yr,mo)} Working Days</div>
+      <button onClick={exp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:12,fontSize:14,color:"#fff",fontWeight:800}}>📥 Export to Excel</button>
+      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>{ms[mo-1]} {yr} — working days vary by weekly off & holiday calendar</div>
       {rows.map(r=>(
         <div key={r.id} style={K}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-            <div><div style={{fontWeight:800}}>{r.name}</div><div style={{fontSize:12,color:G.dim}}>{r.team}</div></div>
+            <div><div style={{fontWeight:800}}>{r.name}</div><div style={{fontSize:12,color:G.dim}}>{r.team} · 📅 {r.cal}</div><div style={{fontSize:11,color:G.dim}}>{r.wd} working days · {r.offDays} off</div></div>
             <div style={{textAlign:"right"}}><div style={{fontSize:20,fontWeight:900,color:r.ab>3?G.rd:G.gold}}>{r.pd}<span style={{fontSize:11,color:G.dim}}>/{r.wd}</span></div><div style={{fontSize:9,color:G.dim}}>paid</div></div>
           </div>
           <div style={{background:G.navy,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
@@ -1368,8 +1401,8 @@ function PT({D,vu,ST,user}) {
               <div key={lb} style={{background:G.navy,borderRadius:8,padding:"5px 6px",textAlign:"center"}}><div style={{fontSize:9,color:G.dim,fontWeight:700}}>{lb}</div><div style={{fontSize:13,fontWeight:900,color:c}}>{v}</div></div>
             ))}
           </div>
-          {r.lt>0&&<div style={{marginTop:6,background:"#1a0f00",border:`1px solid ${G.am}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.am}}>⚠️ {r.lt} late — apply deduction per policy</div>}
-          {r.ab>3&&<div style={{marginTop:4,background:"#1a0000",border:`1px solid ${G.rd}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.rd}}>🚨 {r.ab} absent — high absenteeism</div>}
+          {r.lt>0&&<div style={{marginTop:6,background:"#fff6e8",border:`1px solid ${G.am}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.am}}>⚠️ {r.lt} late — apply deduction per policy</div>}
+          {r.ab>3&&<div style={{marginTop:4,background:"#fdecea",border:`1px solid ${G.rd}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.rd}}>🚨 {r.ab} absent — high absenteeism</div>}
         </div>
       ))}
     </>
@@ -1390,8 +1423,8 @@ function PC({D,P,ST}) {
     <>
       <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave Policy Settings</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Set annual leave limits separately for Employees and Articled Assistants.</div></div>
       <div style={{display:"flex",gap:8,marginBottom:12}}>
-        <button onClick={()=>setEtab("employee")} style={{...B(etab==="employee"?G.gold:G.card),flex:1,fontSize:13,color:etab==="employee"?"#000":"#fff",border:etab==="employee"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Employee</button>
-        <button onClick={()=>setEtab("articled")} style={{...B(etab==="articled"?G.gold:G.card),flex:1,fontSize:13,color:etab==="articled"?"#000":"#fff",border:etab==="articled"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Articled Assistant</button>
+        <button onClick={()=>setEtab("employee")} style={{...B(etab==="employee"?G.gold:G.card),flex:1,fontSize:13,color:etab==="employee"?"#fff":G.mut,border:etab==="employee"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Employee</button>
+        <button onClick={()=>setEtab("articled")} style={{...B(etab==="articled"?G.gold:G.card),flex:1,fontSize:13,color:etab==="articled"?"#fff":G.mut,border:etab==="articled"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Articled Assistant</button>
       </div>
       <div style={K}>
         <div style={{fontWeight:800,marginBottom:4,color:G.gold,fontSize:14}}>{etab==="employee"?"Employee":"Articled Assistant"} — Annual Allowances</div>
@@ -1407,7 +1440,7 @@ function PC({D,P,ST}) {
           </div>
         ))}
         <div style={{display:"flex",gap:8,marginTop:12}}>
-          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>Save Policy</button>
+          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>Save Policy</button>
           <button onClick={reset} style={{...B(G.dim),flex:1}}>Reset All</button>
         </div>
       </div>
@@ -1434,18 +1467,146 @@ function PC({D,P,ST}) {
 }
 
 function HC({D,P,ST}) {
-  const [sa,setSa]=useState(false),[f,setF]=useState({date:"",name:""});
-  const hs=(D.holidays||[]).sort((a,b)=>a.date.localeCompare(b.date));
-  const add=()=>{if(!f.date||!f.name)return ST("Date and name required","error");P({...D,holidays:[...(D.holidays||[]),{...f,id:gid()}]});ST("Added!");setSa(false);setF({date:"",name:""});};
+  const cals=calsOf(D);
+  const [calId,setCalId]=useState(cals[0]?.id||DEFAULT_CAL);
+  const [sa,setSa]=useState(false);
+  const [f,setF]=useState({date:"",name:""});
+  const [mgCal,setMgCal]=useState(false);
+  const [calName,setCalName]=useState("");
+  const [editCal,setEditCal]=useState(null);
+
+  const active=cals.find(x=>x.id===calId)||cals[0];
+  const hs=(D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)===calId)
+    .sort((a,b)=>a.date.localeCompare(b.date));
+  const staffOn=(D.users||[]).filter(u=>calIdOf(u)===calId).length;
+
+  const addHol=()=>{
+    if(!f.date||!f.name)return ST("Date and name required","error");
+    if(hs.some(h=>h.date===f.date))return ST("That date already exists in this calendar","error");
+    P({...D,holidays:[...(D.holidays||[]),{...f,id:gid(),calendarId:calId}]});
+    ST("Holiday added");setSa(false);setF({date:"",name:""});
+  };
+
+  const saveCal=()=>{
+    if(!calName.trim())return ST("Calendar name required","error");
+    const list=calsOf(D);
+    if(editCal){
+      P({...D,holidayCalendars:list.map(x=>x.id===editCal?{...x,name:calName.trim()}:x)});
+      ST("Calendar renamed");
+    } else {
+      const nid="cal_"+gid();
+      P({...D,holidayCalendars:[...list,{id:nid,name:calName.trim()}]});
+      setCalId(nid);ST("Calendar created");
+    }
+    setCalName("");setEditCal(null);setMgCal(false);
+  };
+
+  const delCal=(id)=>{
+    const list=calsOf(D);
+    if(list.length<=1)return ST("At least one calendar is required","error");
+    const users=(D.users||[]).filter(u=>calIdOf(u)===id).length;
+    const hols=(D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)===id).length;
+    if(!confirm(`Delete "${list.find(x=>x.id===id)?.name}"?\n\n${hols} holidays will be deleted.\n${users} staff will move to ${list.find(x=>x.id!==id)?.name}.`))return;
+    const fallback=list.find(x=>x.id!==id).id;
+    P({...D,
+      holidayCalendars:list.filter(x=>x.id!==id),
+      holidays:(D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)!==id),
+      users:(D.users||[]).map(u=>calIdOf(u)===id?{...u,calendarId:fallback}:u)});
+    setCalId(fallback);ST("Calendar deleted");
+  };
+
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>🎉 Holidays</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Holidays are excluded from absent counts.</div></div>
-      <button onClick={()=>setSa(!sa)} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Holiday"}</button>
-      {sa&&(<div style={{...K,marginBottom:10}}><FRow label="Date"><input type="date" style={I} value={f.date} onChange={e=>setF({...f,date:e.target.value})}/></FRow><FRow label="Name"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Diwali"/></FRow><button onClick={add} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Add</button></div>)}
+      <div style={{...K,background:G.card2}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Holiday calendars</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Keep a separate list per office or client location. Each staff member follows one calendar,
+          and their payroll working days are calculated from it.
+        </div>
+      </div>
+
+      {/* Calendar picker */}
+      <div style={{display:"flex",gap:6,overflowX:"auto",marginBottom:10,paddingBottom:4}}>
+        {cals.map(cl=>(
+          <button key={cl.id} onClick={()=>setCalId(cl.id)}
+            style={{...B(calId===cl.id?G.gold:G.card),color:calId===cl.id?"#fff":G.mut,
+              border:calId===cl.id?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"7px 12px",
+              whiteSpace:"nowrap",flexShrink:0,fontWeight:700}}>
+            {cl.name}
+          </button>
+        ))}
+        <button onClick={()=>{setMgCal(!mgCal);setEditCal(null);setCalName("");}}
+          style={{...B(G.card),color:G.mut,border:`1px dashed ${G.bdr}`,fontSize:12,
+            padding:"7px 12px",whiteSpace:"nowrap",flexShrink:0}}>+ Calendar</button>
+      </div>
+
+      {/* Create / rename calendar */}
+      {mgCal&&(
+        <div style={{...K,border:`1px solid ${G.gold}`}}>
+          <div style={{fontWeight:800,color:G.gold,marginBottom:10}}>
+            {editCal?"Rename calendar":"New calendar"}
+          </div>
+          <FRow label="Calendar name">
+            <input style={I} value={calName} onChange={e=>setCalName(e.target.value)}
+              placeholder="e.g. BFSI — Amritsar" onKeyDown={e=>e.key==="Enter"&&saveCal()}/>
+          </FRow>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={saveCal} style={{...B(G.gold),flex:2,color:"#fff",fontWeight:800}}>
+              {editCal?"Save":"Create"}
+            </button>
+            <button onClick={()=>{setMgCal(false);setEditCal(null);setCalName("");}}
+              style={{...B(G.dim),flex:1}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Active calendar summary */}
+      <div style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:14}}>{active?.name}</div>
+          <div style={{fontSize:12,color:G.mut,marginTop:2}}>
+            {hs.length} holidays · {staffOn} staff assigned
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>{setEditCal(calId);setCalName(active?.name||"");setMgCal(true);}}
+            style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>Rename</button>
+          {cals.length>1&&(
+            <button onClick={()=>delCal(calId)}
+              style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>Delete</button>
+          )}
+        </div>
+      </div>
+
+      <button onClick={()=>setSa(!sa)}
+        style={{...B(G.gold),width:"100%",marginBottom:10,color:"#fff",fontWeight:800}}>
+        {sa?"Cancel":`+ Add holiday to ${active?.name}`}
+      </button>
+
+      {sa&&(
+        <div style={{...K}}>
+          <FRow label="Date"><input type="date" style={I} value={f.date} onChange={e=>setF({...f,date:e.target.value})}/></FRow>
+          <FRow label="Occasion"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Diwali"/></FRow>
+          <button onClick={addHol} style={{...B(G.gold),width:"100%",color:"#fff",fontWeight:800}}>Add</button>
+        </div>
+      )}
+
+      {hs.length===0&&!sa&&(
+        <div style={{textAlign:"center",color:G.dim,padding:28,fontSize:13}}>
+          No holidays in this calendar yet.
+        </div>
+      )}
+
       {hs.map(h=>(
         <div key={h.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontWeight:700}}>🎉 {h.name}</div><div style={{fontSize:12,color:G.mut,marginTop:2}}>{fD(h.date)}</div></div>
-          <button onClick={()=>{if(!confirm("Remove?"))return;P({...D,holidays:(D.holidays||[]).filter(x=>x.id!==h.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>✕</button>
+          <div>
+            <div style={{fontWeight:700}}>{h.name}</div>
+            <div style={{fontSize:12,color:G.mut,marginTop:2}}>
+              {fD(h.date)} · {new Date(h.date).toLocaleDateString([],{weekday:"long"})}
+            </div>
+          </div>
+          <button onClick={()=>{if(!confirm(`Remove ${h.name}?`))return;P({...D,holidays:(D.holidays||[]).filter(x=>x.id!==h.id)});}}
+            style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:12,padding:"5px 9px"}}>Remove</button>
         </div>
       ))}
     </>
@@ -1455,7 +1616,7 @@ function HC({D,P,ST}) {
 function SC({D,P,ST}) {
   const [sa,setSa]=useState(false);
   const [editU,setEditU]=useState(null);
-  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",articleshipStart:"",mobile:""};
+  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:DEFAULT_CAL,articleshipStart:"",mobile:""};
   const [f,setF]=useState(emptyF);
   const save=()=>{
     if(!f.name||!f.email)return ST("Name and email required","error");
@@ -1464,13 +1625,13 @@ function SC({D,P,ST}) {
     setSa(false);setEditU(null);setF(emptyF);
   };
   const startEdit=(u)=>{
-    setF({name:u.name,email:u.email,password:u.password||"",role:u.role,employeeType:u.employeeType||"employee",teamId:u.teamId||"",officeIds:u.officeIds||[],reportingTo:u.reportingTo||"",designation:u.designation||"",weeklyOff:u.weeklyOff||"sun_sat",articleshipStart:u.articleshipStart||"",mobile:u.mobile||""});
+    setF({name:u.name,email:u.email,password:u.password||"",role:u.role,employeeType:u.employeeType||"employee",teamId:u.teamId||"",officeIds:u.officeIds||[],reportingTo:u.reportingTo||"",designation:u.designation||"",weeklyOff:u.weeklyOff||"sun_sat",calendarId:calIdOf(u),articleshipStart:u.articleshipStart||"",mobile:u.mobile||""});
     setEditU(u.id);setSa(true);window.scrollTo(0,0);
   };
   const roleColor={admin:G.rd,hr:G.pu,hod:G.bl,manager:G.navyL,staff:G.card2};
   return (
     <>
-      <button onClick={()=>{setSa(!sa);if(sa){setEditU(null);setF(emptyF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>
+      <button onClick={()=>{setSa(!sa);if(sa){setEditU(null);setF(emptyF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#fff",fontWeight:800}}>
         {sa&&!editU?"✕ Cancel":editU?"✕ Cancel Edit":"+ Add Staff"}
       </button>
       {sa&&(
@@ -1516,11 +1677,19 @@ function SC({D,P,ST}) {
               {WEEKLY_OFF_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </FRow>
+          <FRow label="Holiday Calendar">
+            <select style={I} value={f.calendarId||DEFAULT_CAL} onChange={e=>setF({...f,calendarId:e.target.value})}>
+              {calsOf(D).map(cl=><option key={cl.id} value={cl.id}>{cl.name}</option>)}
+            </select>
+            <div style={{fontSize:11,color:G.dim,marginTop:4}}>
+              Decides which holidays apply and the payable working days in payroll.
+            </div>
+          </FRow>
           <FRow label="Offices">
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
               {D.offices.map(o=>{
                 const sel=(f.officeIds||[]).includes(o.id);
-                return <button key={o.id} onClick={()=>setF({...f,officeIds:sel?(f.officeIds||[]).filter(i=>i!==o.id):[...(f.officeIds||[]),o.id]})} style={{...B(sel?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:sel?"#000":"#fff",border:sel?"none":`1px solid ${G.bdr}`}}>{o.name}</button>;
+                return <button key={o.id} onClick={()=>setF({...f,officeIds:sel?(f.officeIds||[]).filter(i=>i!==o.id):[...(f.officeIds||[]),o.id]})} style={{...B(sel?G.gold:G.card2),fontSize:12,padding:"5px 10px",color:sel?"#fff":G.mut,border:sel?"none":`1px solid ${G.bdr}`}}>{o.name}</button>;
               })}
               {D.offices.length===0&&<div style={{fontSize:12,color:G.dim}}>Add offices first</div>}
             </div>
@@ -1531,7 +1700,7 @@ function SC({D,P,ST}) {
             </FRow>
           )}
           <div style={{display:"flex",gap:8}}>
-            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editU?"💾 Save":"➕ Add"}</button>
+            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editU?"💾 Save":"➕ Add"}</button>
             <button onClick={()=>{setSa(false);setEditU(null);setF(emptyF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
           </div>
         </div>
@@ -1547,7 +1716,7 @@ function SC({D,P,ST}) {
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13}}>{u.name}{u.designation&&<span style={{fontSize:11,color:G.mut}}> — {u.designation}</span>}</div>
               <div style={{fontSize:11,color:G.dim}}>{u.email}</div>
-              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).length} office(s)</div>
+              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).length} office(s) · 📅 {calsOf(D).find(x=>x.id===calIdOf(u))?.name||"Default"}</div>
               {mgr&&<div style={{fontSize:11,color:G.mut}}>Reports to: <span style={{color:G.gold}}>{mgr.name}</span></div>}
               <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:3}}>
                 <Chip bg={roleColor[u.role]||G.dim} label={ROLE_LABELS[u.role]||u.role} sm/>
@@ -1578,7 +1747,7 @@ function TC({D,P,ST}) {
   };
   return (
     <>
-      <button onClick={()=>{setSa(!sa);if(sa){setEditT(null);setF(emptyTF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Team"}</button>
+      <button onClick={()=>{setSa(!sa);if(sa){setEditT(null);setF(emptyTF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#fff",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Team"}</button>
       {sa&&(<div style={{...K,marginBottom:10}}>
         <div style={{fontWeight:800,color:editT?G.bl:G.gold,marginBottom:10}}>{editT?"✏️ Edit Team":"New Team"}</div>
         <FRow label="Team Name"><input style={I} value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="e.g. Tax & Regulatory"/></FRow>
@@ -1587,14 +1756,14 @@ function TC({D,P,ST}) {
           <FRow label="Shift End"><input type="time" style={I} value={f.shiftEnd} onChange={e=>setF({...f,shiftEnd:e.target.value})}/></FRow>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editT?"💾 Save":"Create"}</button>
+          <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editT?"💾 Save":"Create"}</button>
           <button onClick={()=>{setSa(false);setEditT(null);setF(emptyTF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
         </div>
       </div>)}
       {D.teams.map(t=>(
         <div key={t.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:G.mut}}>🕘 {t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members</div></div>
-          {D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#000",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
+          {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setF({name:t.name,shiftStart:t.shiftStart,shiftEnd:t.shiftEnd});setEditT(t.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
             <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,teams:D.teams.filter(x=>x.id!==t.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
@@ -1645,7 +1814,7 @@ function OC({D,P,ST}) {
 
   return (
     <>
-      <button onClick={()=>{setSa(!sa);if(sa){setEditO(null);setF(emptyOF);setSearch("");}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Office"}</button>
+      <button onClick={()=>{setSa(!sa);if(sa){setEditO(null);setF(emptyOF);setSearch("");}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#fff",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Office"}</button>
       {sa&&(
         <div style={{...K,marginBottom:10}}>
           <div style={{fontWeight:800,color:editO?G.bl:G.gold,marginBottom:10}}>{editO?"✏️ Edit Office":"🏢 New Office"}</div>
@@ -1663,7 +1832,7 @@ function OC({D,P,ST}) {
           />
           <FRow label="Geofence Radius (meters)"><input type="number" style={I} value={f.radius} onChange={e=>setF({...f,radius:e.target.value})}/></FRow>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editO?"💾 Save":"✅ Add Office"}</button>
+            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editO?"💾 Save":"✅ Add Office"}</button>
             <button onClick={()=>{setSa(false);setEditO(null);setF(emptyOF);setSearch("");}} style={{...B(G.dim),flex:1}}>Cancel</button>
           </div>
         </div>
@@ -1671,7 +1840,7 @@ function OC({D,P,ST}) {
       {D.offices.map(o=>(
         <div key={o.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m</div></div>
-          {D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#000",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
+          {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setF({name:o.name,lat:String(o.lat),lng:String(o.lng),radius:o.radius});setEditO(o.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
             <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,offices:D.offices.filter(x=>x.id!==o.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
@@ -1866,8 +2035,8 @@ function Profile({user,D,P,ST,setSc,logout}) {
 
       {/* Tabs */}
       <div style={{display:"flex",gap:8,marginBottom:12}}>
-        <button onClick={()=>setTab("profile")} style={{...B(tab==="profile"?G.gold:G.card),flex:1,fontSize:13,color:tab==="profile"?"#000":"#fff",border:tab==="profile"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>✏️ Edit Profile</button>
-        <button onClick={()=>setTab("password")} style={{...B(tab==="password"?G.gold:G.card),flex:1,fontSize:13,color:tab==="password"?"#000":"#fff",border:tab==="password"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>🔑 Password</button>
+        <button onClick={()=>setTab("profile")} style={{...B(tab==="profile"?G.gold:G.card),flex:1,fontSize:13,color:tab==="profile"?"#fff":G.mut,border:tab==="profile"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>✏️ Edit Profile</button>
+        <button onClick={()=>setTab("password")} style={{...B(tab==="password"?G.gold:G.card),flex:1,fontSize:13,color:tab==="password"?"#fff":G.mut,border:tab==="password"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>🔑 Password</button>
       </div>
 
       {tab==="profile"&&(
@@ -1902,7 +2071,7 @@ function Profile({user,D,P,ST,setSc,logout}) {
               ST={ST}
             />
           </div>
-          <button onClick={saveProfile} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>💾 Save Profile</button>
+          <button onClick={saveProfile} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>💾 Save Profile</button>
         </div>
       )}
 
@@ -1918,10 +2087,10 @@ function Profile({user,D,P,ST,setSc,logout}) {
           <FRow label="Confirm New Password">
             <input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} placeholder="Re-enter new password" onKeyDown={e=>e.key==="Enter"&&savePwd()}/>
           </FRow>
-          <div style={{background:"#1a0f00",border:`1px solid ${G.am}`,borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,color:G.am}}>
+          <div style={{background:"#fff6e8",border:`1px solid ${G.am}`,borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,color:G.am}}>
             ⚠️ After changing password you will be logged out automatically.
           </div>
-          <button onClick={savePwd} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>🔑 Change Password</button>
+          <button onClick={savePwd} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>🔑 Change Password</button>
         </div>
       )}
     </div>
@@ -1954,13 +2123,13 @@ function LateApproval({user,D,P,ST,AN,setSc}) {
         <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
         <h2 style={{margin:0,fontSize:17,fontWeight:800,color:G.am}}>Late Approval Request</h2>
       </div>
-      <div style={{...K,background:"#1a0f00",border:`1px solid ${G.am}`,marginBottom:12}}>
+      <div style={{...K,background:"#fff6e8",border:`1px solid ${G.am}`,marginBottom:12}}>
         <div style={{color:G.am,fontWeight:700}}>⚠️ Late by {rec.lateBy} minutes today</div>
         {mgr&&<div style={{fontSize:12,color:G.mut,marginTop:4}}>Request will go to: {mgr.name}</div>}
       </div>
       <div style={K}>
         <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:100}} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Why were you late?"/></FRow>
-        <button onClick={submit} style={{...B(`linear-gradient(135deg,${G.am},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Send Approval Request</button>
+        <button onClick={submit} style={{...B(`linear-gradient(135deg,${G.am},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Send Approval Request</button>
       </div>
     </div>
   );
@@ -1989,7 +2158,7 @@ function ChangePwd({user,D,P,ST,setSc}) {
         <FRow label="Current Password"><input type="password" style={I} value={cur} onChange={e=>setCur(e.target.value)}/></FRow>
         <FRow label="New Password"><input type="password" style={I} value={np} onChange={e=>setNp(e.target.value)} placeholder="Min 6 characters"/></FRow>
         <FRow label="Confirm Password"><input type="password" style={I} value={cp} onChange={e=>setCp(e.target.value)} onKeyDown={e=>e.key==="Enter"&&save()}/></FRow>
-        <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Change Password</button>
+        <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Change Password</button>
       </div>
     </div>
   );
@@ -2041,7 +2210,7 @@ function SuperAdmin({D,P,ST,setSc,logout}) {
       <div style={{...K,textAlign:"center",padding:32}}>
         <div style={{fontSize:40}}>🚫</div>
         <div style={{fontWeight:700,marginTop:12}}>Access Denied</div>
-        <button onClick={()=>setSc("dash")} style={{...B(G.gold),color:"#000",marginTop:16}}>← Back</button>
+        <button onClick={()=>setSc("dash")} style={{...B(G.gold),color:"#fff",marginTop:16}}>← Back</button>
       </div>
     </div>
   );
@@ -2054,14 +2223,14 @@ function SuperAdmin({D,P,ST,setSc,logout}) {
         <button onClick={()=>setSc("dash")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
         <h2 style={{margin:0,fontSize:17,fontWeight:800,color:G.gold}}>Firm Settings</h2>
       </div>
-      <div style={K}>
+      {SAAS_MODE&&<div style={K}>
         <div style={{fontWeight:700,color:G.gold,marginBottom:12}}>📋 Subscription</div>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
           <span style={{color:G.mut}}>Current Plan</span>
           <Chip bg={plan==="trial"?G.am:G.gr} label={PLANS[plan]?.name||plan} sm/>
         </div>
         {plan==="trial"&&(
-          <div style={{background:"#1a0f00",border:`1px solid ${G.am}`,borderRadius:10,padding:12,marginBottom:12}}>
+          <div style={{background:"#fff6e8",border:`1px solid ${G.am}`,borderRadius:10,padding:12,marginBottom:12}}>
             <div style={{color:G.am,fontWeight:700}}>⏰ Trial: {daysLeft} days remaining</div>
             <div style={{fontSize:12,color:G.mut,marginTop:4}}>Upgrade to continue after trial ends</div>
           </div>
@@ -2076,16 +2245,16 @@ function SuperAdmin({D,P,ST,setSc,logout}) {
               </div>
               {plan===key
                 ?<Chip bg={G.gr} label="Current" sm/>
-                :<button onClick={()=>{ST(`Contact ag@nucleusadvisors.in to upgrade to ${pl.name}`,"info");}} style={{...B(G.gold),fontSize:11,padding:"5px 10px",color:"#000"}}>Upgrade</button>
+                :<button onClick={()=>{ST(`Contact ag@nucleusadvisors.in to upgrade to ${pl.name}`,"info");}} style={{...B(G.gold),fontSize:11,padding:"5px 10px",color:"#fff"}}>Upgrade</button>
               }
             </div>
           </div>
         ))}
-      </div>
+      </div>}
       <div style={K}>
         <div style={{fontWeight:700,color:G.gold,marginBottom:12}}>🏢 Firm Details</div>
         <div style={{fontSize:13,color:G.mut}}>Firm: <span style={{color:G.txt,fontWeight:700}}>{D.companyName}</span></div>
-        <div style={{fontSize:13,color:G.mut,marginTop:4}}>Staff: <span style={{color:G.txt,fontWeight:700}}>{(D.users||[]).filter(u=>u.role!=="admin").length} / {PLANS[plan]?.maxUsers||10}</span></div>
+        <div style={{fontSize:13,color:G.mut,marginTop:4}}>Staff: <span style={{color:G.txt,fontWeight:700}}>{(D.users||[]).filter(u=>u.role!=="admin").length}{SAAS_MODE?` / ${PLANS[plan]?.maxUsers||10}`:""}</span></div>
         <div style={{fontSize:13,color:G.mut,marginTop:4}}>City: <span style={{color:G.txt}}>{D.city||"—"}</span></div>
       </div>
     </div>
@@ -2111,7 +2280,7 @@ function BR({D,P,ST}) {
         <div style={{color:G.gold,fontWeight:700}}>🏢 Branch Management</div>
         <div style={{fontSize:12,color:G.dim,marginTop:3}}>Manage your firm's branches. Assign offices and branch heads.</div>
       </div>
-      <button onClick={()=>{setSa(!sa);if(sa){setEditB(null);setF(emptyBF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#000",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Branch"}</button>
+      <button onClick={()=>{setSa(!sa);if(sa){setEditB(null);setF(emptyBF);}}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:10,color:"#fff",fontWeight:800}}>{sa?"✕ Cancel":"+ Add Branch"}</button>
       {sa&&(
         <div style={{...K,marginBottom:10}}>
           <div style={{fontWeight:800,color:editB?G.bl:G.gold,marginBottom:10}}>{editB?"✏️ Edit Branch":"New Branch"}</div>
@@ -2126,7 +2295,7 @@ function BR({D,P,ST}) {
             </select>
           </FRow>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#000",fontWeight:800}}>{editB?"💾 Save":"Add Branch"}</button>
+            <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editB?"💾 Save":"Add Branch"}</button>
             <button onClick={()=>{setSa(false);setEditB(null);setF(emptyBF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
           </div>
         </div>
@@ -2207,7 +2376,7 @@ function BK({D,P,ST}) {
 
   return (
     <>
-      <div style={{...K,background:"#001a0f",border:`1px solid ${G.gr}`}}>
+      <div style={{...K,background:"#e9f7ef",border:`1px solid ${G.gr}`}}>
         <div style={{color:G.gr,fontWeight:800,fontSize:14}}>💾 Backup & Restore</div>
         <div style={{color:G.dim,fontSize:12,marginTop:4}}>Auto-backup runs daily. You can also create manual backups anytime and restore to any previous backup.</div>
       </div>
@@ -2235,7 +2404,7 @@ function BK({D,P,ST}) {
             <button
               onClick={()=>doRestore(b)}
               disabled={!!restoring}
-              style={{...B(restoring===b.id?G.dim:G.am),color:"#000",fontSize:11,fontWeight:800,padding:"7px 12px",flexShrink:0}}
+              style={{...B(restoring===b.id?G.dim:G.am),color:"#fff",fontSize:11,fontWeight:800,padding:"7px 12px",flexShrink:0}}
             >
               {restoring===b.id?"⏳ Restoring...":"↩️ Restore"}
             </button>
@@ -2277,16 +2446,16 @@ function RST({D,P,ST,logout}) {
   };
   if(step==="done") return (
     <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,textAlign:"center",padding:32,background:"#0d2010",border:`1px solid ${G.gr}`}}>
+      <div style={{...K,textAlign:"center",padding:32,background:"#e9f7ef",border:`1px solid ${G.gr}`}}>
         <div style={{fontSize:48,marginBottom:12}}>✅</div>
         <div style={{fontWeight:800,fontSize:18,color:G.gr,marginBottom:16}}>Reset Complete</div>
-        <button onClick={()=>{setStep("menu");logout();}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#000",fontWeight:800}}>Logout & Restart</button>
+        <button onClick={()=>{setStep("menu");logout();}} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Logout & Restart</button>
       </div>
     </div>
   );
   return (
     <div style={{maxWidth:440,margin:"0 auto"}}>
-      <div style={{...K,background:"#1a0a00",border:`1px solid ${G.rd}`,marginBottom:16}}><div style={{color:G.rd,fontWeight:800}}>⚠️ Danger Zone — All resets are permanent</div></div>
+      <div style={{...K,background:"#fff6e8",border:`1px solid ${G.rd}`,marginBottom:16}}><div style={{color:G.rd,fontWeight:800}}>⚠️ Danger Zone — All resets are permanent</div></div>
       {step==="menu"&&(<>
         <div style={K}><div style={{fontWeight:800,color:G.am,marginBottom:6}}>🗑 Level 1 — Reset All Data</div><div style={{fontSize:12,color:G.mut,marginBottom:8}}>Deletes attendance, leaves, locations. Keeps users.</div><button onClick={()=>setStep("pwd_data")} style={{...B(G.am),width:"100%"}}>Proceed →</button></div>
         <div style={K}><div style={{fontWeight:800,color:G.rd,marginBottom:6}}>🔄 Level 2 — Factory Reset</div><div style={{fontSize:12,color:G.mut,marginBottom:8}}>Wipes everything except admin.</div><button onClick={()=>setStep("pwd_full")} style={{...B(G.rd),width:"100%"}}>Proceed →</button></div>
