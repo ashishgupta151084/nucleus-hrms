@@ -282,14 +282,21 @@ const SEED={
   notifications:[],regularizations:[],
 };
 
-const G={bg:"#f5f7fb",card:"#ffffff",card2:"#eef1f7",bdr:"#dfe4ee",gold:"#E31E24",goldL:"#ff5a5f",goldD:"#b01419",navy:"#1B2A5E",navyL:"#2f4585",txt:"#1B2A5E",mut:"#5a6b91",dim:"#8a97b5",gr:"#0f9d58",rd:"#d93025",am:"#e8890c",bl:"#1a73e8",pu:"#7b3ff2"};
-const B=(bg,x={})=>({background:bg,color:"#fff",border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
+const G={bg:"#f5f7fb",card:"#ffffff",card2:"#eef1f7",bdr:"#dfe4ee",gold:"#E31E24",goldL:"#ff5a5f",goldD:"#b01419",navy:"#1B2A5E",navyL:"#2f4585",txt:"#1B2A5E",mut:"#5a6b91",dim:"#5d6b8f",gr:"#0b7a44",rd:"#c5221f",am:"#a35200",bl:"#1662c4",pu:"#7b3ff2"};
+// Readable text for any background: dark ink on light fills, white on dark/gradients.
+const isLightBg=bg=>{
+  if(typeof bg!=="string"||!/^#[0-9a-fA-F]{6}$/.test(bg))return false;
+  const r=parseInt(bg.slice(1,3),16),g=parseInt(bg.slice(3,5),16),b=parseInt(bg.slice(5,7),16);
+  return (0.299*r+0.587*g+0.114*b)>170;
+};
+const inkOn=bg=>isLightBg(bg)?G.txt:"#fff";
+const B=(bg,x={})=>({background:bg,color:inkOn(bg),border:"none",borderRadius:10,padding:"12px 18px",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit",...x});
 const I={width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${G.bdr}`,background:"#fff",color:G.txt,fontSize:14,fontFamily:"inherit",boxSizing:"border-box"};
 const L={fontSize:11,color:G.mut,marginBottom:4,display:"block",fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase"};
 const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12,boxShadow:"0 1px 3px rgba(27,42,94,0.06)"};
 
 const Chip=({bg,label,sm})=>(
-  <span style={{background:bg,color:"#fff",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
+  <span style={{background:bg,color:inkOn(bg),border:isLightBg(bg)?`1px solid ${G.bdr}`:"none",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
 );
 const FRow=({label,children})=>(
   <div style={{marginBottom:12}}><label style={L}>{label}</label>{children}</div>
@@ -682,13 +689,13 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       {(hol||isWE(tod()))&&(
         <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:14,padding:"12px 16px",marginBottom:14,display:"flex",gap:10,alignItems:"center"}}>
           <div style={{fontSize:26}}>{hol?"🎉":"🌟"}</div>
-          <div><div style={{color:G.gold,fontWeight:800,fontSize:14}}>{hol||"Weekend"}</div><div style={{color:G.mut,fontSize:12}}>No attendance needed</div></div>
+          <div><div style={{color:"#fff",fontWeight:800,fontSize:14}}>{hol||"Weekend"}</div><div style={{color:"#c9d3ea",fontSize:12}}>No attendance needed</div></div>
         </div>
       )}
       <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
-        <div style={{fontSize:40,fontWeight:900,color:G.gold}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
-        <div style={{color:G.mut,fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
-        {sh&&<div style={{marginTop:8,background:"rgba(201,168,76,.15)",border:`1px solid ${G.gold}44`,borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:G.gold}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
+        <div style={{fontSize:40,fontWeight:900,color:"#fff"}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
+        <div style={{color:"#c9d3ea",fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
+        {sh&&<div style={{marginTop:8,background:"rgba(255,255,255,.14)",border:"1px solid rgba(255,255,255,.3)",borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:"#fff"}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
       <div style={K}>
         {(!rec||(rec&&rec.checkOut))?(
@@ -892,7 +899,7 @@ function Hist({user,D,setSc}) {
       </div>
       <div style={{...K,marginBottom:12,padding:14}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontWeight:700,fontSize:13}}>{MS[mo-1]} {yr}</span><span style={{color:pct>=80?G.gr:pct>=60?G.am:G.rd,fontWeight:900}}>{pct}%</span></div>
-        <div style={{background:G.navy,borderRadius:8,height:8,overflow:"hidden"}}><div style={{background:pct>=80?`linear-gradient(90deg,${G.gr},${G.goldL})`:pct>=60?`linear-gradient(90deg,${G.am},${G.gold})`:`linear-gradient(90deg,${G.rd},${G.am})`,height:"100%",width:`${pct}%`,borderRadius:8}}/></div>
+        <div style={{background:G.card2,borderRadius:8,height:8,overflow:"hidden"}}><div style={{background:pct>=80?`linear-gradient(90deg,${G.gr},${G.goldL})`:pct>=60?`linear-gradient(90deg,${G.am},${G.gold})`:`linear-gradient(90deg,${G.rd},${G.am})`,height:"100%",width:`${pct}%`,borderRadius:8}}/></div>
         <div style={{fontSize:11,color:G.dim,marginTop:5}}>{present+late} of {total} working days attended</div>
       </div>
       {allDays.length===0
@@ -911,7 +918,7 @@ function Hist({user,D,setSc}) {
               </div>
               {rec?.selfie
                 ?<img src={rec.selfie} style={{width:38,height:38,borderRadius:"50%",objectFit:"cover",border:`2px solid ${stColor}`,flexShrink:0}}/>
-                :<div style={{width:38,height:38,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{stIcon}</div>
+                :<div style={{width:38,height:38,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{stIcon}</div>
               }
               <div style={{flex:1,minWidth:0}}>
                 {rec
@@ -959,7 +966,7 @@ function Lv({user,D,P,ST,setSc}) {
         <div style={{fontSize:11,color:G.mut,fontWeight:700,textTransform:"uppercase",marginBottom:10}}>Balance</div>
         <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
           {Object.entries(pol).map(([t,a])=>{const r=a-used(t);return(
-            <div key={t} style={{background:G.navy,borderRadius:10,padding:"8px 10px",flex:"1 1 60px",textAlign:"center",border:`1px solid ${r>0?G.bdr:G.rd+"44"}`}}>
+            <div key={t} style={{background:G.card2,borderRadius:10,padding:"8px 10px",flex:"1 1 60px",textAlign:"center",border:`1px solid ${r>0?G.bdr:G.rd+"44"}`}}>
               <div style={{fontSize:9,color:G.dim,textTransform:"uppercase",fontWeight:700}}>{t}</div>
               <div style={{fontSize:19,fontWeight:900,color:r>0?G.gold:G.rd}}>{r}</div>
               <div style={{fontSize:9,color:G.dim}}>/{a}</div>
@@ -1149,14 +1156,14 @@ function OV({D,vu}) {
       </div>
       <div style={{...K,marginBottom:12}}>
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontWeight:700}}>Attendance</span><span style={{color:G.gold,fontWeight:900}}>{pct}%</span></div>
-        <div style={{background:G.navy,borderRadius:8,height:9,overflow:"hidden"}}><div style={{background:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${pct}%`,borderRadius:8,transition:"width .5s"}}/></div>
+        <div style={{background:G.card2,borderRadius:8,height:9,overflow:"hidden"}}><div style={{background:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${pct}%`,borderRadius:8,transition:"width .5s"}}/></div>
         <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}><span style={{fontSize:11,color:G.dim}}>{ci}/{tot} in</span><span style={{fontSize:11,color:G.bl}}>📍{lN} live</span></div>
       </div>
       <div style={K}>
         <div style={{fontWeight:700,marginBottom:8,color:G.gold}}>Today</div>
         {vu.map(u=>{const r=userLatest[u.id],lv=D.liveLocations?.[u.id];return(
           <div key={u.id} style={{display:"flex",gap:8,alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${G.bdr}`}}>
-            {r?.selfie?<img src={r.selfie} style={{width:34,height:34,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>👤</div>}
+            {r?.selfie?<img src={r.selfie} style={{width:34,height:34,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:34,height:34,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>👤</div>}
             <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700}}>{u.name}{lv&&<span style={{marginLeft:5,width:6,height:6,background:G.gr,borderRadius:"50%",display:"inline-block",animation:"pulse 2s infinite"}}/>}</div><div style={{fontSize:11,color:G.dim}}>{r?`In:${fT(r.checkIn)}${r.checkOut?` Out:${fT(r.checkOut)}`:""}${r.lateBy>0?` ⚠️${r.lateBy}m`:""}${r.isWFH?" 🏠":""}` : "Absent"}</div></div>
             <Chip bg={r?(sb[r.status]||G.gr):G.rd} label={r?r.status:"—"} sm/>
           </div>
@@ -1193,7 +1200,7 @@ function LV({D,vu}) {
 
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}>
         <div style={{color:G.gold,fontWeight:700,fontSize:13}}>📍 Live Location</div>
         <div style={{color:G.dim,fontSize:12,marginTop:3}}>{lv.length}/{vu.length} sharing location.</div>
       </div>
@@ -1213,7 +1220,7 @@ function LV({D,vu}) {
         return (
           <div key={u.id} style={{...K,border:sel===u.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
             <div style={{display:"flex",gap:10,alignItems:"center"}}>
-              {r?.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>}
+              {r?.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>}
               <div style={{flex:1}}>
                 <div style={{fontWeight:700,display:"flex",gap:6,alignItems:"center"}}>
                   {u.name}
@@ -1228,7 +1235,7 @@ function LV({D,vu}) {
               <Chip bg={checkedIn?G.gr:checkedOut?G.bl:G.am} label={checkedIn?"In":checkedOut?"Done":"No Record"} sm/>
             </div>
             {sel===u.id&&(
-              <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}}>
+              <div style={{marginTop:10,background:G.card2,borderRadius:10,padding:12}}>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
                   {[["Lat",loc.lat?.toFixed(5)],["Lng",loc.lng?.toFixed(5)],["Accuracy",`±${loc.ac||"?"}m`],["City",cityName||"Loading..."],["Last updated",ageMin<1?"just now":ageMin<60?`${ageMin}m ago`:`${Math.floor(ageMin/60)}h ago`],["Office dist",`${Math.round(nr?.d||0)}m from ${nr?.name||"office"}`]].map(([lb,v])=>(
                     <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}>
@@ -1248,7 +1255,7 @@ function LV({D,vu}) {
           <div style={{color:G.dim,fontSize:10,fontWeight:700,textTransform:"uppercase",marginBottom:6,marginTop:4}}>Offline / No recent location</div>
           {off.map(u=>(
             <div key={u.id} style={{...K,opacity:.5,display:"flex",gap:10,alignItems:"center"}}>
-              <div style={{width:34,height:34,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>
+              <div style={{width:34,height:34,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>
               <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700}}>{u.name}</div><div style={{fontSize:11,color:G.dim}}>No location data</div></div>
               <Chip bg={G.dim} label="—" sm/>
             </div>
@@ -1317,7 +1324,7 @@ function AT({D,vu,P,ST,isA}) {
       {recs.map(r=>(
         <div key={r.id} style={{...K,border:sel===r.id?`1px solid ${G.gold}`:`1px solid ${G.bdr}`,cursor:"pointer"}} onClick={()=>{if(editId!==r.id){setSel(sel===r.id?null:r.id);}}}>
           <div style={{display:"flex",gap:10,alignItems:"center"}}>
-            {r.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.navy,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>}
+            {r.selfie?<img src={r.selfie} style={{width:44,height:44,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:44,height:44,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>}
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13}}>{r.userName}{r.isWFH&&<span style={{marginLeft:5,fontSize:11,color:G.bl}}>🏠</span>}</div>
               <div style={{color:G.mut,fontSize:12}}>In:{fT(r.checkIn)}{r.checkOut?` Out:${fT(r.checkOut)} ${wHr(r.checkIn,r.checkOut)}`:""}</div>
@@ -1327,7 +1334,7 @@ function AT({D,vu,P,ST,isA}) {
           </div>
 
           {sel===r.id&&editId!==r.id&&(
-            <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}}>
+            <div style={{marginTop:10,background:G.card2,borderRadius:10,padding:12}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
                 {[["Date",fD(r.date)],["In",fT(r.checkIn)],["Out",r.checkOut?fT(r.checkOut):"—"],["Hours",r.checkOut?wHr(r.checkIn,r.checkOut):"—"],["Late",r.lateBy>0?`${r.lateBy}m`:"✓"],["Office",r.officeName||"Manual"]].map(([lb,v])=>(
                   <div key={lb} style={{background:G.card2,borderRadius:8,padding:"6px 10px"}}>
@@ -1343,7 +1350,7 @@ function AT({D,vu,P,ST,isA}) {
           )}
 
           {editId===r.id&&(
-            <div style={{marginTop:10,background:G.navy,borderRadius:10,padding:12}} onClick={e=>e.stopPropagation()}>
+            <div style={{marginTop:10,background:G.card2,borderRadius:10,padding:12}} onClick={e=>e.stopPropagation()}>
               <div style={{color:G.gold,fontWeight:700,marginBottom:10}}>✏️ Edit Attendance — {r.userName}</div>
               <FRow label="Status">
                 <select style={I} value={ef.status} onChange={e=>setEf({...ef,status:e.target.value})}>
@@ -1660,7 +1667,7 @@ function RT({D,vu,P,ST,AN}) {
   };
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📝 Regularization Requests</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Staff can fix missed attendance entries.</div></div>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📝 Regularization Requests</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Staff can fix missed attendance entries.</div></div>
       {rgs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No requests.</div>}
       {rgs.map(r=>(
         <div key={r.id} style={K}>
@@ -1705,7 +1712,7 @@ function PT({D,vu,ST,user}) {
   };
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>💰 Payroll Report</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Monthly payroll-ready export for salary processing.</div></div>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>💰 Payroll Report</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Monthly payroll-ready export for salary processing.</div></div>
       <div style={{display:"flex",gap:8,marginBottom:10}}>
         <div style={{flex:2}}><label style={L}>Month</label><select style={I} value={mo} onChange={e=>setMo(Number(e.target.value))}>{ms.map((m,i)=><option key={i} value={i+1}>{m}</option>)}</select></div>
         <div style={{flex:1}}><label style={L}>Year</label><input type="number" style={I} value={yr} onChange={e=>setYr(Number(e.target.value))}/></div>
@@ -1718,10 +1725,10 @@ function PT({D,vu,ST,user}) {
             <div><div style={{fontWeight:800}}>{r.name}</div><div style={{fontSize:12,color:G.dim}}>{r.team} · 📅 {r.cal}</div><div style={{fontSize:11,color:G.dim}}>{r.wd} working days · {r.offDays} off</div></div>
             <div style={{textAlign:"right"}}><div style={{fontSize:20,fontWeight:900,color:r.ab>3?G.rd:G.gold}}>{r.pd}<span style={{fontSize:11,color:G.dim}}>/{r.wd}</span></div><div style={{fontSize:9,color:G.dim}}>paid</div></div>
           </div>
-          <div style={{background:G.navy,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
+          <div style={{background:G.card2,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
             {[["✅Pres",r.pr,G.gr],["⚠️Late",r.lt,G.am],["🏠WFH",r.wf,G.bl],["🌓Half",r.hd,G.pu],["🏖CL",r.cl,G.bl],["🤒SL",r.sl,G.rd],["🔄CO",r.co,G.mut],["❌Ab",r.ab,r.ab>3?G.rd:G.dim],["⏱Hrs",r.tH,G.gold]].map(([lb,v,c])=>(
-              <div key={lb} style={{background:G.navy,borderRadius:8,padding:"5px 6px",textAlign:"center"}}><div style={{fontSize:9,color:G.dim,fontWeight:700}}>{lb}</div><div style={{fontSize:13,fontWeight:900,color:c}}>{v}</div></div>
+              <div key={lb} style={{background:G.card2,borderRadius:8,padding:"5px 6px",textAlign:"center"}}><div style={{fontSize:9,color:G.dim,fontWeight:700}}>{lb}</div><div style={{fontSize:13,fontWeight:900,color:c}}>{v}</div></div>
             ))}
           </div>
           {r.lt>0&&<div style={{marginTop:6,background:"#fff6e8",border:`1px solid ${G.am}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.am}}>⚠️ {r.lt} late — apply deduction per policy</div>}
@@ -1744,7 +1751,7 @@ function PC({D,P,ST}) {
   const reset=()=>{setPolEmp({...DP_EMP});setPolAA({...DP_AA});P({...D,leavePolicy:DP});ST("Reset!");};
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave Policy Settings</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Set annual leave limits separately for Employees and Articled Assistants.</div></div>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.gold}44`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave Policy Settings</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Set annual leave limits separately for Employees and Articled Assistants.</div></div>
       <div style={{display:"flex",gap:8,marginBottom:12}}>
         <button onClick={()=>setEtab("employee")} style={{...B(etab==="employee"?G.gold:G.card),flex:1,fontSize:13,color:etab==="employee"?"#fff":G.mut,border:etab==="employee"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Employee</button>
         <button onClick={()=>setEtab("articled")} style={{...B(etab==="articled"?G.gold:G.card),flex:1,fontSize:13,color:etab==="articled"?"#fff":G.mut,border:etab==="articled"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Articled Assistant</button>
@@ -1779,7 +1786,7 @@ function PC({D,P,ST}) {
                 <Chip bg={u.employeeType==="articled"?G.pu:G.bl} label={u.employeeType==="articled"?"Articled":"Employee"} sm/>
               </div>
               <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                {Object.entries(uPol).map(([t,mx])=>{const us=ub[t];return(<div key={t} style={{background:G.navy,borderRadius:6,padding:"2px 7px",fontSize:10,border:`1px solid ${us>=mx&&mx>0?G.rd+"44":G.bdr}`}}><span style={{color:G.dim}}>{t}:</span><span style={{color:us>=mx&&mx>0?G.rd:G.gold,fontWeight:700}}>{us}/{mx}</span></div>);})}
+                {Object.entries(uPol).map(([t,mx])=>{const us=ub[t];return(<div key={t} style={{background:G.card2,borderRadius:6,padding:"2px 7px",fontSize:10,border:`1px solid ${us>=mx&&mx>0?G.rd+"44":G.bdr}`}}><span style={{color:G.dim}}>{t}:</span><span style={{color:us>=mx&&mx>0?G.rd:G.gold,fontWeight:700}}>{us}/{mx}</span></div>);})}
               </div>
             </div>
           );
@@ -2229,7 +2236,7 @@ function LocationPicker({value, onChange, ST}) {
       {/* Google Maps iframe */}
       {showMap&&(
         <div style={{marginBottom:8,borderRadius:12,overflow:"hidden",border:`2px solid ${G.gold}`}}>
-          <div style={{background:G.navy,padding:"8px 12px",fontSize:12,color:G.am}}>
+          <div style={{background:G.card2,padding:"8px 12px",fontSize:12,color:G.am}}>
             ⚠️ After finding your location on the map, copy the coordinates below manually or use GPS button above.
           </div>
           <iframe
@@ -2253,7 +2260,7 @@ function LocationPicker({value, onChange, ST}) {
 
       {/* Selected location display */}
       {value?.lat&&value?.lng&&(
-        <div style={{background:G.navy,borderRadius:10,padding:"10px 12px",fontSize:12,marginBottom:8,border:`1px solid ${G.gold}44`}}>
+        <div style={{background:G.card2,borderRadius:10,padding:"10px 12px",fontSize:12,marginBottom:8,border:`1px solid ${G.gold}44`}}>
           <div style={{color:G.gold,fontWeight:700,marginBottom:4}}>✅ Selected Location</div>
           {value.address&&<div style={{color:G.txt,marginBottom:4,fontSize:11,lineHeight:1.4}}>{value.address}</div>}
           <div style={{color:G.dim,fontSize:11}}>📌 {value.lat}, {value.lng}</div>
@@ -2338,7 +2345,7 @@ function Profile({user,D,P,ST,setSc,logout}) {
         </div>
         <div>
           <div style={{fontWeight:800,fontSize:15,color:"#fff"}}>{user.name}</div>
-          <div style={{fontSize:12,color:G.dim,marginTop:2}}>{user.email}</div>
+          <div style={{fontSize:12,color:"#c9d3ea",marginTop:2}}>{user.email}</div>
           <div style={{display:"flex",gap:6,marginTop:4}}>
             <Chip bg={G.gold} label={ROLE_LABELS[user.role]||user.role} sm/>
             <Chip bg={user.employeeType==="articled"?G.pu:G.bl} label={user.employeeType==="articled"?"Articled":"Employee"} sm/>
@@ -2519,7 +2526,7 @@ function ORG({D,vu}) {
   const admins=D.users.filter(u=>u.role==="admin");
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700}}>🏛 Organisation Hierarchy</div></div>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700}}>🏛 Organisation Hierarchy</div></div>
       {admins.map(u=>renderUser(u,0))}
       {topLevel.filter(u=>u.role!=="admin").map(u=>renderUser(u,0))}
     </>
@@ -2606,7 +2613,7 @@ function BR({D,P,ST}) {
   };
   return (
     <>
-      <div style={{...K,background:G.navy,border:`1px solid ${G.navyL}`}}>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}>
         <div style={{color:G.gold,fontWeight:700}}>🏢 Branch Management</div>
         <div style={{fontSize:12,color:G.dim,marginTop:3}}>Manage your firm's branches. Assign offices and branch heads.</div>
       </div>
