@@ -13,10 +13,10 @@ import {
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
 const CONFIG_FIELDS = [
-  "users", "offices", "teams", "branches", "leavePolicy", "holidays", "holidayCalendars",
+  "users", "offices", "teams", "branches", "leavePolicy", "holidays", "holidayCalendars", "leRules",
   "companyName", "firmId", "firmPlan", "firmTrial"
 ];
-const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays", "holidayCalendars"]);
+const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays", "holidayCalendars", "leRules"]);
 
 const configFrom = data => clean({
   users: data.users || [],
@@ -26,6 +26,7 @@ const configFrom = data => clean({
   leavePolicy: data.leavePolicy || null,
   holidays: data.holidays || [],
   holidayCalendars: data.holidayCalendars || [],
+  leRules: data.leRules || [],
   companyName: data.companyName || "Nucleus HRMS",
   firmId: data.firmId || null,
   firmPlan: data.firmPlan || null,
@@ -172,6 +173,67 @@ const daysOfMonth=(y,m)=>{
 // Payable working days: excludes this person's weekly offs and their calendar's holidays
 const workingDaysFor=(y,m,hols,weeklyOff)=>
   daysOfMonth(y,m).filter(ds=>!isDayOff(ds,hols,weeklyOff)).length;
+
+// ── Late coming / early leaving ────────────────────────────────────
+// Rules live in D.leRules as {id, scope, targetId, limit, lateMins, earlyMins}.
+// scope: "default" | "office" | "team" | "staff". Most specific wins, field by
+// field: staff > team > office > firm default. A blank field falls through.
+const LE_DEFAULT={limit:4,lateMins:10,earlyMins:10};
+const leRuleFor=(D,user)=>{
+  const rs=D.leRules||[];
+  const find=(scope,tid)=>rs.find(r=>r.scope===scope&&r.targetId===tid);
+  const staff=user?find("staff",user.id):null;
+  const team=user?.teamId?find("team",user.teamId):null;
+  const office=(user?.officeIds||[]).map(o=>find("office",o)).find(Boolean)||null;
+  const firm=rs.find(r=>r.scope==="default")||null;
+  const chain=[staff,team,office,firm];
+  const pick=k=>{
+    for(const r of chain){ if(r&&r[k]!==undefined&&r[k]!==null&&r[k]!=="") return Number(r[k]); }
+    return LE_DEFAULT[k];
+  };
+  const src=k=>{ const i=chain.findIndex(r=>r&&r[k]!==undefined&&r[k]!==null&&r[k]!==""); return ["staff","team","office","firm"][i]||"default"; };
+  return {limit:pick("limit"),lateMins:pick("lateMins"),earlyMins:pick("earlyMins"),limitFrom:src("limit")};
+};
+const shiftFor=(D,user)=>{
+  if(user?.customShift?.shiftStart)return user.customShift;
+  const t=(D.teams||[]).find(x=>x.id===user?.teamId);
+  return t?{shiftStart:t.shiftStart,shiftEnd:t.shiftEnd}:null;
+};
+const minsBeforeEnd=(co,se)=>{const [h,m]=se.split(":").map(Number),e=new Date(co);e.setHours(h,m,0,0);return Math.max(0,Math.round((e-new Date(co))/60000));};
+
+// Every late / early incident for one person in a month, oldest first.
+// Worked out from the attendance records each time, so a rule change applies
+// to the whole month straight away. The first `limit` incidents are allowed;
+// every one after that needs manager regularization.
+const leIncidents=(D,user,month)=>{
+  const rule=leRuleFor(D,user), sh=shiftFor(D,user);
+  if(!sh)return {rule,list:[],used:0,needReg:0,regd:0,open:0,exception:false};
+  const recs=(D.attendance||[])
+    .filter(a=>a.userId===user.id&&a.date?.startsWith(month)&&!a.isWFH&&!a.isOD&&a.checkIn)
+    .sort((a,b)=>a.checkIn.localeCompare(b.checkIn));
+  const pend=(D.regularizations||[]).filter(r=>r.userId===user.id&&r.type==="le_reg"&&r.status==="pending");
+  const list=[];
+  recs.forEach(a=>{
+    const lm=lateBy(a.checkIn,sh.shiftStart);
+    if(lm>rule.lateMins) list.push({recId:a.id,date:a.date,kind:"late",mins:lm,at:a.checkIn,
+      regd:!!(a.lateReg||a.lateApproved)});
+    if(a.checkOut){
+      const em=minsBeforeEnd(a.checkOut,sh.shiftEnd);
+      if(em>rule.earlyMins) list.push({recId:a.id,date:a.date,kind:"early",mins:em,at:a.checkOut,
+        regd:!!a.earlyReg});
+    }
+  });
+  list.sort((a,b)=>a.at.localeCompare(b.at));
+  list.forEach((x,i)=>{
+    x.n=i+1;
+    x.allowed=i<rule.limit;
+    x.pending=pend.some(r=>r.recId===x.recId&&r.kind===x.kind);
+  });
+  const over=list.filter(x=>!x.allowed);
+  const regd=over.filter(x=>x.regd).length;
+  return {rule,list,used:Math.min(list.length,rule.limit),needReg:over.length,regd,
+    open:over.filter(x=>!x.regd).length,exception:regd>rule.limit};
+};
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
@@ -559,10 +621,12 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   };
   const doIn=async()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
+    const lr=leRuleFor(D,user);
+    const isLate=lb>lr.lateMins;
     const rec2={id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
       date:tod(),checkIn:new Date().toISOString(),checkOut:null,
-      selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,
-      status:wfh?"wfh":lb>30?"late":"present",lateBy:lb,isWFH:wfh};
+      selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,officeId:wfh?null:(office?.id||null),
+      status:wfh?"wfh":isLate?"late":"present",lateBy:lb,isWFH:wfh};
     try{
       // Update live location with check-in GPS so admin sees current location
       if(gps){
@@ -571,7 +635,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       await addAttendance(rec2);
       let msg="✅ Checked in!";
       if(wfh)msg="🏠 WFH check-in done!";
-      else if(lb>30)msg=`⚠️ ${lb}m late — check-in saved!`;
+      else if(isLate)msg=`⚠️ ${lb}m late — check-in saved`;
       ST(msg);setStep("done");
     }catch(e){
       // Retry once on failure
@@ -592,7 +656,8 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         if(cg){
           updateLiveLocation(user.id,{lat:cg.lat,lng:cg.lng,ac:0,ts:checkOutTime});
         }
-        await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg});
+        const ebm=(!rec.isWFH&&sh)?minsBeforeEnd(checkOutTime,sh.shiftEnd):0;
+        await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg,earlyBy:ebm});
         notifyCheckout(user, fT(checkOutTime), wHr(rec.checkIn,checkOutTime)||"");
         ST("👋 Checked out successfully!");
       }catch(e){
@@ -683,11 +748,82 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           </div>
         )}
       </div>
+      <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Staff view: this month's late / early count and regularization ─
+function LECard({D,user,ST,AN}) {
+  const [open,setOpen]=useState(null);   // "recId|kind" being regularized
+  const [why,setWhy]=useState("");
+  const [show,setShow]=useState(false);
+  const mon=tod().slice(0,7);
+  const s=leIncidents(D,user,mon);
+  if(!s.list.length)return null;
+  const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
+  const request=async(x)=>{
+    if(!why.trim())return ST("Please give a reason","error");
+    await addReg({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
+      type:"le_reg",kind:x.kind,recId:x.recId,date:x.date,mins:x.mins,reason:why.trim(),
+      appliedOn:new Date().toISOString(),status:"pending"});
+    if(mgr)AN(mgr.id,`${user.name} requested regularization: ${x.kind==="late"?"late by":"left early by"} ${x.mins} min on ${fD(x.date)}. Reason: ${why.trim()}`,"info");
+    ST("Sent to your manager");setOpen(null);setWhy("");
+  };
+  const over=s.list.filter(x=>!x.allowed);
+  const tone=s.open>0?G.am:G.gr;
+  return (
+    <div style={{...K,border:`1px solid ${s.open>0?G.am:G.bdr}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}} onClick={()=>setShow(!show)}>
+        <div>
+          <div style={{fontWeight:700,fontSize:13}}>Late / early this month</div>
+          <div style={{fontSize:12,color:G.mut,marginTop:2}}>
+            {s.used} of {s.rule.limit} allowed used
+            {s.needReg>0&&<span style={{color:tone}}> · {s.open} need regularization</span>}
+          </div>
+        </div>
+        <div style={{fontSize:20,fontWeight:900,color:tone}}>{s.list.length}</div>
+      </div>
+      {show&&(
+        <div style={{marginTop:10}}>
+          <div style={{fontSize:11,color:G.dim,marginBottom:6}}>
+            Late = check-in more than {s.rule.lateMins} min after shift start. Early = check-out more than {s.rule.earlyMins} min before shift end.
+          </div>
+          {s.list.map(x=>{
+            const k=x.recId+"|"+x.kind;
+            const state=x.allowed?"Within limit":x.regd?"Regularized":x.pending?"Pending":"Needs regularization";
+            const col=x.allowed?G.dim:x.regd?G.gr:x.pending?G.bl:G.am;
+            return (
+              <div key={k} style={{borderTop:`1px solid ${G.bdr}`,padding:"8px 0"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700}}>#{x.n} · {fD(x.date)}</div>
+                    <div style={{fontSize:11,color:G.mut}}>{x.kind==="late"?`Late by ${x.mins} min`:`Left ${x.mins} min early`}</div>
+                  </div>
+                  {!x.allowed&&!x.regd&&!x.pending
+                    ?<button onClick={()=>{setOpen(open===k?null:k);setWhy("");}} style={{...B(G.am),fontSize:11,padding:"5px 10px"}}>Regularize</button>
+                    :<span style={{fontSize:11,fontWeight:700,color:col}}>{state}</span>}
+                </div>
+                {open===k&&(
+                  <div style={{marginTop:8}}>
+                    <textarea style={{...I,minHeight:60,resize:"vertical"}} value={why} onChange={e=>setWhy(e.target.value)} placeholder="Reason"/>
+                    <div style={{display:"flex",gap:8,marginTop:6}}>
+                      <button onClick={()=>request(x)} style={{...B(G.gold),flex:2,fontSize:12}}>Send to manager</button>
+                      <button onClick={()=>setOpen(null)} style={{...B(G.dim),flex:1,fontSize:12}}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {over.length===0&&<div style={{fontSize:11,color:G.gr,marginTop:4}}>All within your monthly allowance.</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -928,21 +1064,23 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],...(user.role==="hod"?[["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
     ?D.users.filter(u=>u.role!=="admin")
     :isHOD
-    ?D.users.filter(u=>u.teamId===user.teamId&&u.role!=="admin")
+    ?D.users.filter(u=>u.role!=="admin"&&(u.teamId===user.teamId||(D.teams||[]).some(t=>t.id===u.teamId&&t.hodId===user.id)))
     :D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId)||u.id===user.id);
   const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
+  const mon=tod().slice(0,7);
+  const pX=vu.filter(u=>{const s=leIncidents(D,u,mon);return s.exception||s.open>0;}).length;
   const tp={D,P,ST,AN,vu,isA,user};
   return (
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-        <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":isHOD?"HOD / Partner":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
         {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
@@ -955,6 +1093,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
           <button key={id} onClick={()=>setTab(id)} style={{...B(tab===id?G.gold:G.card),whiteSpace:"nowrap",fontSize:12,padding:"7px 9px",border:tab===id?"none":`1px solid ${G.bdr}`,color:tab===id?"#fff":G.mut,flexShrink:0,position:"relative",fontWeight:tab===id?800:600}}>
             {lb}
             {id==="lv"&&pL>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pL}</span>}
+            {id==="ex"&&pX>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pX}</span>}
             {id==="rg"&&pR>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pR}</span>}
           </button>
         ))}
@@ -973,7 +1112,8 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="org"&&<ORG {...tp}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
-      {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
+      {tab==="ex"&&(isA||isHOD)&&<EX {...tp}/>}
+      {tab==="le"&&(isA||isHOD)&&<LER {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
     </div>
   );
@@ -1307,11 +1447,194 @@ function LT({D,vu,P,ST,AN,isA}) {
   );
 }
 
+// ── Exception Dashboard (HR, Admin, HOD/Partner) ───────────────────
+function EX({D,vu}) {
+  const now=new Date();
+  const [mon,setMon]=useState(`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`);
+  const [sel,setSel]=useState(null);
+  const rows=vu.map(u=>({u,s:leIncidents(D,u,mon)}))
+    .filter(r=>r.s.needReg>0)
+    .sort((a,b)=>(b.s.exception-a.s.exception)||(b.s.open-a.s.open)||(b.s.regd-a.s.regd));
+  const nEx=rows.filter(r=>r.s.exception).length;
+  const nOpen=rows.filter(r=>r.s.open>0).length;
+  return (
+    <>
+      <div style={{...K,background:G.card2}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Exception dashboard</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Staff who crossed their monthly late/early limit. <b>Exception</b> = regularizations beyond the limit.
+          <b> Open</b> = not yet regularized; becomes LOP at month end.
+        </div>
+      </div>
+      <FRow label="Month"><input type="month" style={I} value={mon} onChange={e=>setMon(e.target.value)}/></FRow>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <div style={{...K,flex:1,textAlign:"center",marginBottom:0,padding:12}}>
+          <div style={{fontSize:22,fontWeight:900,color:G.rd}}>{nEx}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>EXCEPTIONS</div></div>
+        <div style={{...K,flex:1,textAlign:"center",marginBottom:0,padding:12}}>
+          <div style={{fontSize:22,fontWeight:900,color:G.am}}>{nOpen}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>WITH OPEN ITEMS</div></div>
+        <div style={{...K,flex:1,textAlign:"center",marginBottom:0,padding:12}}>
+          <div style={{fontSize:22,fontWeight:900,color:G.navy}}>{rows.length}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>OVER LIMIT</div></div>
+      </div>
+      {rows.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30}}>Nobody crossed their limit this month.</div>}
+      {rows.map(({u,s})=>{
+        const team=(D.teams||[]).find(t=>t.id===u.teamId);
+        const mgr=(D.users||[]).find(x=>x.id===u.reportingTo);
+        return (
+          <div key={u.id} style={{...K,border:`1px solid ${s.exception?G.rd:s.open?G.am:G.bdr}`,cursor:"pointer"}} onClick={()=>setSel(sel===u.id?null:u.id)}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div>
+                <div style={{fontWeight:800}}>{u.name}</div>
+                <div style={{fontSize:11,color:G.mut}}>{team?.name||"No team"}{mgr&&` · Manager: ${mgr.name}`}</div>
+                <div style={{fontSize:12,marginTop:4}}>
+                  {s.list.length} incidents · limit {s.rule.limit} · {s.needReg} over · {s.regd} regularized · <span style={{color:s.open?G.am:G.dim}}>{s.open} open</span>
+                </div>
+              </div>
+              {s.exception
+                ?<Chip bg={G.rd} label="EXCEPTION" sm/>
+                :s.open>0?<Chip bg={G.am} label="OPEN" sm/>:<Chip bg={G.gr} label="CLEARED" sm/>}
+            </div>
+            {sel===u.id&&(
+              <div style={{marginTop:10}}>
+                {s.list.filter(x=>!x.allowed).map(x=>(
+                  <div key={x.recId+x.kind} style={{display:"flex",justifyContent:"space-between",borderTop:`1px solid ${G.bdr}`,padding:"6px 0",fontSize:12}}>
+                    <span>#{x.n} {fD(x.date)} · {x.kind==="late"?`late ${x.mins}m`:`early ${x.mins}m`}</span>
+                    <span style={{fontWeight:700,color:x.regd?G.gr:x.pending?G.bl:G.am}}>{x.regd?"Regularized":x.pending?"Pending":"Open"}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+// ── Late/early rules editor (HR & Admin: all; HOD: own teams + their staff) ──
+function LER({D,P,ST,user,vu,isA}) {
+  const rules=D.leRules||[];
+  const myTeams=isA?(D.teams||[]):(D.teams||[]).filter(t=>t.hodId===user.id||t.id===user.teamId);
+  const myStaff=isA?(D.users||[]).filter(u=>u.role!=="admin"):vu;
+  const scopes=isA?[["office","Office"],["team","Team"],["staff","Staff"]]:[["team","Team"],["staff","Staff"]];
+  const firm=rules.find(r=>r.scope==="default")||{};
+  const [fd,setFd]=useState({limit:firm.limit??LE_DEFAULT.limit,lateMins:firm.lateMins??LE_DEFAULT.lateMins,earlyMins:firm.earlyMins??LE_DEFAULT.earlyMins});
+  const [f,setF]=useState({scope:scopes[0][0],targetId:"",limit:"",lateMins:"",earlyMins:""});
+  const [chk,setChk]=useState("");
+
+  const targets=f.scope==="office"?(D.offices||[]):f.scope==="team"?myTeams:myStaff;
+  const nameOf=r=>r.scope==="office"?(D.offices||[]).find(x=>x.id===r.targetId)?.name
+    :r.scope==="team"?(D.teams||[]).find(x=>x.id===r.targetId)?.name
+    :(D.users||[]).find(x=>x.id===r.targetId)?.name;
+  const canEdit=r=>isA||(r.scope==="team"&&myTeams.some(t=>t.id===r.targetId))||(r.scope==="staff"&&myStaff.some(u=>u.id===r.targetId));
+  const num=v=>v===""||v===null||v===undefined?"":Math.max(0,parseInt(v)||0);
+
+  const saveFirm=()=>{
+    const rec={id:"le_default",scope:"default",targetId:null,limit:num(fd.limit)||0,lateMins:num(fd.lateMins)||0,earlyMins:num(fd.earlyMins)||0};
+    P({...D,leRules:[...rules.filter(r=>r.id!=="le_default"),rec]});ST("Firm default saved");
+  };
+  const saveOv=()=>{
+    if(!f.targetId)return ST("Choose who this applies to","error");
+    if(f.limit===""&&f.lateMins===""&&f.earlyMins==="")return ST("Enter at least one value","error");
+    const id=`le_${f.scope}_${f.targetId}`;
+    const rec={id,scope:f.scope,targetId:f.targetId,limit:num(f.limit),lateMins:num(f.lateMins),earlyMins:num(f.earlyMins),
+      setBy:user.id,setOn:new Date().toISOString()};
+    P({...D,leRules:[...rules.filter(r=>r.id!==id),rec]});
+    ST("Override saved");setF({...f,targetId:"",limit:"",lateMins:"",earlyMins:""});
+  };
+  const del=r=>{if(!confirm(`Remove override for ${nameOf(r)}?`))return;P({...D,leRules:rules.filter(x=>x.id!==r.id)});};
+
+  const ovs=rules.filter(r=>r.scope!=="default").sort((a,b)=>a.scope.localeCompare(b.scope));
+  const chkU=(D.users||[]).find(u=>u.id===chk);
+  const eff=chkU?leRuleFor(D,chkU):null;
+  const show=v=>v===""||v===null||v===undefined?"inherit":v;
+
+  return (
+    <>
+      <div style={{...K,background:G.card2}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Late coming / early leaving rules</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Late and early count together against one monthly limit. Priority: <b>staff › team › office › firm default</b>.
+          Leave a field blank in an override to inherit it.
+        </div>
+      </div>
+
+      {isA&&(
+        <div style={K}>
+          <div style={{fontWeight:800,marginBottom:8}}>Firm default</div>
+          <div style={{display:"flex",gap:8}}>
+            <FRow label="Allowed / month"><input type="number" style={I} value={fd.limit} onChange={e=>setFd({...fd,limit:e.target.value})}/></FRow>
+            <FRow label="Late after (min)"><input type="number" style={I} value={fd.lateMins} onChange={e=>setFd({...fd,lateMins:e.target.value})}/></FRow>
+            <FRow label="Early before (min)"><input type="number" style={I} value={fd.earlyMins} onChange={e=>setFd({...fd,earlyMins:e.target.value})}/></FRow>
+          </div>
+          <button onClick={saveFirm} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save firm default</button>
+        </div>
+      )}
+
+      <div style={K}>
+        <div style={{fontWeight:800,marginBottom:8}}>Add / update override</div>
+        <div style={{display:"flex",gap:8}}>
+          <FRow label="Applies to">
+            <select style={I} value={f.scope} onChange={e=>setF({...f,scope:e.target.value,targetId:""})}>
+              {scopes.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </FRow>
+          <FRow label={f.scope==="office"?"Office":f.scope==="team"?"Team":"Staff member"}>
+            <select style={I} value={f.targetId} onChange={e=>{
+              const id=e.target.value;const ex=rules.find(r=>r.id===`le_${f.scope}_${id}`);
+              setF({...f,targetId:id,limit:ex?.limit??"",lateMins:ex?.lateMins??"",earlyMins:ex?.earlyMins??""});
+            }}>
+              <option value="">Select…</option>
+              {targets.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </FRow>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <FRow label="Allowed / month"><input type="number" style={I} value={f.limit} placeholder="inherit" onChange={e=>setF({...f,limit:e.target.value})}/></FRow>
+          <FRow label="Late after (min)"><input type="number" style={I} value={f.lateMins} placeholder="inherit" onChange={e=>setF({...f,lateMins:e.target.value})}/></FRow>
+          <FRow label="Early before (min)"><input type="number" style={I} value={f.earlyMins} placeholder="inherit" onChange={e=>setF({...f,earlyMins:e.target.value})}/></FRow>
+        </div>
+        <button onClick={saveOv} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save override</button>
+      </div>
+
+      <div style={K}>
+        <div style={{fontWeight:800,marginBottom:8}}>Check what applies to someone</div>
+        <select style={I} value={chk} onChange={e=>setChk(e.target.value)}>
+          <option value="">Select staff…</option>
+          {myStaff.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+        </select>
+        {eff&&(
+          <div style={{marginTop:8,fontSize:13}}>
+            <b>{eff.limit}</b> per month (from {eff.limitFrom}) · late after <b>{eff.lateMins}</b> min · early before <b>{eff.earlyMins}</b> min
+          </div>
+        )}
+      </div>
+
+      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"4px 0 8px"}}>Overrides ({ovs.length})</div>
+      {ovs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20,fontSize:13}}>No overrides — everyone uses the firm default.</div>}
+      {ovs.map(r=>(
+        <div key={r.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:13}}>{nameOf(r)||"(deleted)"} <span style={{fontSize:11,color:G.dim,fontWeight:600}}>· {r.scope}</span></div>
+            <div style={{fontSize:12,color:G.mut}}>limit {show(r.limit)} · late {show(r.lateMins)} · early {show(r.earlyMins)}</div>
+          </div>
+          {canEdit(r)&&<button onClick={()=>del(r)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>Remove</button>}
+        </div>
+      ))}
+    </>
+  );
+}
+
 function RT({D,vu,P,ST,AN}) {
   const rgs=(D.regularizations||[]).filter(r=>vu.some(u=>u.id===r.userId)).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const ap=(id)=>{
     const r=(D.regularizations||[]).find(x=>x.id===id);if(!r)return;
+    if(r.type==="le_reg"){
+      if(r.recId)updateAttendance(r.recId,r.kind==="early"?{earlyReg:true}:{lateReg:true});
+      updateReg(id,{status:"approved",reviewedOn:new Date().toISOString()});
+      AN(r.userId,`Your ${r.kind==="early"?"early leaving":"late coming"} on ${fD(r.date)} was regularized.`,"success");
+      ST("✅ Regularized");return;
+    }
     if(r.type==="late_approval"){
       const ea=(D.attendance||[]).find(a=>a.userId===r.userId&&a.date===r.date);
       if(ea)updateAttendance(ea.id,{status:"present",lateBy:0,lateApproved:true});
@@ -1342,7 +1665,7 @@ function RT({D,vu,P,ST,AN}) {
       {rgs.map(r=>(
         <div key={r.id} style={K}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-            <div><div style={{fontWeight:800}}>{r.userName}</div><div style={{fontSize:13,color:G.gold,marginTop:1}}>📅 {fD(r.date)}</div><div style={{fontSize:12,color:G.mut,marginTop:1}}>🕐 {r.checkIn}→{r.checkOut}</div><div style={{fontSize:12,color:G.dim,fontStyle:"italic"}}>"{r.reason}"</div></div>
+            <div><div style={{fontWeight:800}}>{r.userName}</div><div style={{fontSize:13,color:G.gold,marginTop:1}}>📅 {fD(r.date)}</div><div style={{fontSize:12,color:G.mut,marginTop:1}}>{r.type==="le_reg"?(r.kind==="early"?`Left ${r.mins} min early`:`Late by ${r.mins} min`):`🕐 ${r.checkIn}→${r.checkOut}`}</div><div style={{fontSize:12,color:G.dim,fontStyle:"italic"}}>"{r.reason}"</div></div>
             <Chip bg={sc[r.status]||G.dim} label={r.status} sm/>
           </div>
           {r.status==="pending"&&<div style={{display:"flex",gap:8}}><button onClick={()=>ap(r.id)} style={{...B(G.gr),flex:1,fontSize:13}}>✅</button><button onClick={()=>rj(r.id)} style={{...B(G.rd),flex:1,fontSize:13}}>❌</button></div>}
@@ -1644,7 +1967,7 @@ function SC({D,P,ST}) {
             <select style={I} value={f.role} onChange={e=>setF({...f,role:e.target.value})}>
               <option value="staff">Staff</option>
               <option value="manager">Manager</option>
-              <option value="hod">HOD (Head of Dept)</option>
+              <option value="hod">HOD / Partner</option>
               <option value="hr">HR Manager</option>
             </select>
           </FRow>
@@ -1737,7 +2060,7 @@ function SC({D,P,ST}) {
 function TC({D,P,ST}) {
   const [sa,setSa]=useState(false);
   const [editT,setEditT]=useState(null);
-  const emptyTF={name:"",shiftStart:"09:30",shiftEnd:"18:30"};
+  const emptyTF={name:"",shiftStart:"09:30",shiftEnd:"18:30",hodId:""};
   const [f,setF]=useState(emptyTF);
   const save=()=>{
     if(!f.name)return ST("Name required","error");
@@ -1755,6 +2078,13 @@ function TC({D,P,ST}) {
           <FRow label="Shift Start"><input type="time" style={I} value={f.shiftStart} onChange={e=>setF({...f,shiftStart:e.target.value})}/></FRow>
           <FRow label="Shift End"><input type="time" style={I} value={f.shiftEnd} onChange={e=>setF({...f,shiftEnd:e.target.value})}/></FRow>
         </div>
+        <FRow label="HOD / Partner">
+          <select style={I} value={f.hodId||""} onChange={e=>setF({...f,hodId:e.target.value})}>
+            <option value="">— None —</option>
+            {(D.users||[]).filter(u=>u.role==="hod"||u.role==="admin").map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+          <div style={{fontSize:11,color:G.dim,marginTop:4}}>Sees this team's exceptions and can set its late/early limits.</div>
+        </FRow>
         <div style={{display:"flex",gap:8}}>
           <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editT?"💾 Save":"Create"}</button>
           <button onClick={()=>{setSa(false);setEditT(null);setF(emptyTF);}} style={{...B(G.dim),flex:1}}>Cancel</button>
@@ -1762,10 +2092,10 @@ function TC({D,P,ST}) {
       </div>)}
       {D.teams.map(t=>(
         <div key={t.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:G.mut}}>🕘 {t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members</div></div>
+          <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:G.mut}}>🕘 {t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members{t.hodId&&` · HOD: ${(D.users||[]).find(u=>u.id===t.hodId)?.name||"—"}`}</div></div>
           {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>{setF({name:t.name,shiftStart:t.shiftStart,shiftEnd:t.shiftEnd});setEditT(t.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
+            <button onClick={()=>{setF({name:t.name,shiftStart:t.shiftStart,shiftEnd:t.shiftEnd,hodId:t.hodId||""});setEditT(t.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
             <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,teams:D.teams.filter(x=>x.id!==t.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
           </div>
         </div>
