@@ -6,7 +6,9 @@ import {
   addReg, updateReg, onRegs,
   updateLiveLocation, onLiveLocations,
   addNotification, updateNotification, onNotifications,
-  saveBackup, getBackups, restoreBackup
+  saveBackup, getBackups, restoreBackup,
+  addWorkApproval, updateWorkApproval, onWorkApprovals,
+  addCompOff, updateCompOff, onCompOffs
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
@@ -234,6 +236,72 @@ const leIncidents=(D,user,month)=>{
   return {rule,list,used:Math.min(list.length,rule.limit),needReg:over.length,regd,
     open:over.filter(x=>!x.regd).length,exception:regd>rule.limit};
 };
+
+// ── Comp off ───────────────────────────────────────────────────────
+// A credit is earned only for an APPROVED request to work on a weekly off or
+// holiday, and only from real check-in/check-out time that day:
+//   worked >= 75% of shift -> 1 day,  >= 40% -> 0.5 day,  less -> nothing.
+// Opening balances entered by HR/HOD are credits too. Every credit expires
+// 90 days after it was earned (or entered). Comp off leave uses the credit
+// closest to expiry first. Pending leave already reserves balance.
+const CO_FULL=0.75, CO_HALF=0.40, CO_DAYS=90;
+const addDays=(ds,n)=>{const d=new Date(ds+"T12:00:00");d.setDate(d.getDate()+n);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;};
+const shiftMinsOf=sh=>{if(!sh)return 540;const [a,b]=sh.shiftStart.split(":").map(Number),[x,y]=sh.shiftEnd.split(":").map(Number);return Math.max(60,(x*60+y)-(a*60+b));};
+const coNeed=(l,hols,wo)=>{
+  if(l.duration==="half")return 0.5;
+  let n=0,d=l.from;const end=l.to||l.from;
+  while(d<=end){ if(!isDayOff(d,hols,wo))n++; d=addDays(d,1); }
+  return n;
+};
+const compOffLedger=(D,user)=>{
+  const today=tod(), sh=shiftFor(D,user), full=shiftMinsOf(sh);
+  const hols=holsFor(D,user), wo=user?.weeklyOff||"sun_sat";
+  const credits=[];
+  (D.workApprovals||[]).filter(w=>w.userId===user.id&&w.status==="approved"&&!w.creditCancelled&&w.date<=today).forEach(w=>{
+    const recs=(D.attendance||[]).filter(a=>a.userId===user.id&&a.date===w.date&&a.checkIn);
+    const mins=recs.filter(a=>a.checkOut).reduce((s,a)=>s+wMin(a.checkIn,a.checkOut),0);
+    const open=recs.some(a=>!a.checkOut);
+    const r=mins/full, value=r>=CO_FULL?1:r>=CO_HALF?0.5:0;
+    credits.push({id:w.id,kind:"work",date:w.date,value,mins,open,expires:addDays(w.date,CO_DAYS)});
+  });
+  (D.compoffs||[]).filter(x=>x.userId===user.id&&x.type==="opening"&&!x.cancelled).forEach(x=>{
+    credits.push({id:x.id,kind:"opening",date:x.date,value:Number(x.value)||0,mins:0,open:false,expires:addDays(x.date,CO_DAYS),note:x.note});
+  });
+  credits.sort((a,b)=>a.expires.localeCompare(b.expires)||a.date.localeCompare(b.date));
+  credits.forEach(x=>x.left=x.value);
+  const uses=(D.leaves||[]).filter(l=>l.userId===user.id&&l.type==="compoff"&&(l.status==="approved"||l.status==="pending"))
+    .sort((a,b)=>a.from.localeCompare(b.from));
+  const usage=uses.map(l=>{
+    let need=coNeed(l,hols,wo); const want=need;
+    for(const x of credits){
+      if(need<=0)break;
+      if(x.left<=0||x.date>l.from||x.expires<=l.from)continue;
+      const t=Math.min(x.left,need); x.left-=t; need-=t;
+    }
+    return {leave:l,days:want,uncovered:need};
+  });
+  const live=credits.filter(x=>x.left>0&&x.expires>today);
+  const soon=addDays(today,15);
+  return {
+    credits,usage,
+    available:live.reduce((s,x)=>s+x.left,0),
+    expiringSoon:live.filter(x=>x.expires<=soon).reduce((s,x)=>s+x.left,0),
+    expired:credits.filter(x=>x.left>0&&x.expires<=today).reduce((s,x)=>s+x.left,0),
+    earned:credits.reduce((s,x)=>s+x.value,0),
+    used:usage.reduce((s,u)=>s+(u.days-u.uncovered),0),
+    availableOn:(date)=>credits.filter(x=>x.left>0&&x.date<=date&&x.expires>date).reduce((s,x)=>s+x.left,0),
+  };
+};
+// Upcoming weekly offs and holidays for one person
+const upcomingOffs=(D,user,days=60)=>{
+  const hols=holsFor(D,user), wo=user?.weeklyOff||"sun_sat", out=[];
+  for(let i=0;i<days;i++){
+    const ds=addDays(tod(),i);
+    if(isDayOff(ds,hols,wo)){const h=hols.find(x=>x.date===ds);out.push({date:ds,name:h?h.name:"Weekly off"});}
+  }
+  return out;
+};
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
@@ -353,7 +421,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],liveLocations:{},notifications:[],loaded:false});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],workApprovals:[],compoffs:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -385,6 +453,8 @@ export default function App() {
   useEffect(()=>{const u=onAttendance(r=>setD(p=>({...p,attendance:r})));return u;},[]);
   useEffect(()=>{const u=onLeaves(r=>setD(p=>({...p,leaves:r})));return u;},[]);
   useEffect(()=>{const u=onRegs(r=>setD(p=>({...p,regularizations:r})));return u;},[]);
+  useEffect(()=>{const u=onWorkApprovals(r=>setD(p=>({...p,workApprovals:r})));return u;},[]);
+  useEffect(()=>{const u=onCompOffs(r=>setD(p=>({...p,compoffs:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
   useEffect(()=>{
     if(!cu)return;
@@ -473,7 +543,7 @@ export default function App() {
 
   return (
     <div style={{fontFamily:"'Nunito',sans-serif",background:G.bg,minHeight:"100vh",color:G.txt}}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.dim};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');:root{color-scheme:only light}*{box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:${G.dim};border-radius:3px}input::placeholder,textarea::placeholder{color:${G.dim}}select option{background:${G.card}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
       {sc==="login"&&<Login login={login} name={D.companyName} setSc={setSc} D={D}/>}
       {sc==="home"&&<Home {...props}/>}
       {sc==="hist"&&<Hist {...props}/>}
@@ -481,10 +551,9 @@ export default function App() {
       {sc==="notif"&&<Notif {...props}/>}
       {sc==="reg"&&<Reg {...props}/>}
       {sc==="profile"&&<Profile {...props} logout={logout}/>}
+      {sc==="workreq"&&<WorkReq {...props}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
-      {sc==="changepwd"&&<ChangePwd {...props}/>}
-      {sc==="teamdash"&&<Dash {...props}/>}
       {sc==="teamdash"&&<Dash {...props}/>}
       {sc==="dash"&&<Dash {...props}/>}
       {sc==="register"&&<Register {...props}/>}
@@ -686,12 +755,21 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
           <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Out</button>
         </div>
       </div>
-      {(hol||isWE(tod()))&&(
-        <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:14,padding:"12px 16px",marginBottom:14,display:"flex",gap:10,alignItems:"center"}}>
-          <div style={{fontSize:26}}>{hol?"🎉":"🌟"}</div>
-          <div><div style={{color:"#fff",fontWeight:800,fontSize:14}}>{hol||"Weekend"}</div><div style={{color:"#c9d3ea",fontSize:12}}>No attendance needed</div></div>
-        </div>
-      )}
+      {(hol||isWE(tod(),user.weeklyOff||"sun_sat"))&&(()=>{
+        const wa=(D.workApprovals||[]).find(w=>w.userId===user.id&&w.date===tod()&&w.status!=="cancelled");
+        const ok=wa?.status==="approved";
+        return(
+        <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${ok?G.gr:G.gold}`,borderRadius:14,padding:"12px 16px",marginBottom:14,display:"flex",gap:10,alignItems:"center"}}>
+          <div style={{fontSize:26}}>{ok?"🛠":hol?"🎉":"🌟"}</div>
+          <div>
+            <div style={{color:"#fff",fontWeight:800,fontSize:14}}>{hol||"Weekly off"}</div>
+            <div style={{color:"#c9d3ea",fontSize:12}}>
+              {ok?"Approved to work today — check in and check out (WFH allowed) to earn comp off."
+                 :wa?.status==="pending"?"Your request to work today is awaiting approval."
+                 :"No attendance needed. To earn comp off, get approval first via Work on Holiday."}
+            </div>
+          </div>
+        </div>);})()}
       <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
         <div style={{fontSize:40,fontWeight:900,color:"#fff"}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
         <div style={{color:"#c9d3ea",fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
@@ -757,7 +835,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       </div>
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -830,6 +908,84 @@ function LECard({D,user,ST,AN}) {
           })}
           {over.length===0&&<div style={{fontSize:11,color:G.gr,marginTop:4}}>All within your monthly allowance.</div>}
         </div>
+      )}
+    </div>
+  );
+}
+
+function WorkReq({user,D,ST,AN,setSc}) {
+  const [sel,setSel]=useState(null);
+  const [why,setWhy]=useState("");
+  const mine=(D.workApprovals||[]).filter(w=>w.userId===user.id);
+  const offs=upcomingOffs(D,user,60);
+  const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
+  const L=compOffLedger(D,user);
+  const submit=async()=>{
+    if(!why.trim())return ST("Please give a reason","error");
+    if(!mgr)return ST("No reporting manager set — ask admin to set one","error");
+    if(mine.some(w=>w.date===sel.date&&w.status!=="cancelled"&&w.status!=="rejected"))return ST("Already requested for this date","error");
+    await addWorkApproval({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,managerId:mgr.id,
+      date:sel.date,dayName:sel.name,reason:why.trim(),appliedOn:new Date().toISOString(),status:"pending"});
+    AN(mgr.id,`${user.name} wants to work on ${fD(sel.date)} (${sel.name}). Reason: ${why.trim()}`,"info");
+    ST("Request sent to "+mgr.name);setSel(null);setWhy("");
+  };
+  const withdraw=async w=>{if(!confirm("Withdraw this request?"))return;await updateWorkApproval(w.id,{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});ST("Withdrawn");};
+  const stCol={pending:G.am,approved:G.gr,rejected:G.rd,cancelled:G.dim};
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14}}>
+        <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Work on holiday / weekly off</h2>
+      </div>
+      <div style={{...K,background:G.card2}}>
+        <div style={{fontSize:12,color:G.mut}}>
+          Get approval first, then check in and check out that day (WFH is fine). ≥75% of your shift earns 1 comp off, ≥40% earns half. Comp off expires 90 days after it is earned.
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:10}}>
+          <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:20,fontWeight:900,color:G.gr}}>{L.available}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>AVAILABLE</div></div>
+          <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:20,fontWeight:900,color:G.am}}>{L.expiringSoon}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>EXPIRING ≤15 DAYS</div></div>
+        </div>
+      </div>
+      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"4px 0 8px"}}>Your upcoming days off</div>
+      {offs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20}}>No days off in the next 60 days.</div>}
+      {offs.map(o=>{
+        const req=mine.find(w=>w.date===o.date&&w.status!=="cancelled");
+        return (
+          <div key={o.date} style={{...K,padding:12,border:`1px solid ${sel?.date===o.date?G.gold:G.bdr}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><div style={{fontWeight:700,fontSize:13}}>{fD(o.date)} · {new Date(o.date+"T12:00:00").toLocaleDateString([],{weekday:"short"})}</div><div style={{fontSize:12,color:G.mut}}>{o.name}</div></div>
+              {req
+                ?<div style={{display:"flex",gap:6,alignItems:"center"}}><Chip bg={stCol[req.status]||G.dim} label={req.status} sm/>{req.status==="pending"&&<button onClick={()=>withdraw(req)} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:11,padding:"4px 8px"}}>Withdraw</button>}</div>
+                :<button onClick={()=>{setSel(sel?.date===o.date?null:o);setWhy("");}} style={{...B(sel?.date===o.date?G.gold:G.card2),border:sel?.date===o.date?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px"}}>{sel?.date===o.date?"Selected":"Request"}</button>}
+            </div>
+            {sel?.date===o.date&&(
+              <div style={{marginTop:10}}>
+                <textarea style={{...I,minHeight:60,resize:"vertical"}} value={why} onChange={e=>setWhy(e.target.value)} placeholder="Why do you need to work this day?"/>
+                <button onClick={submit} style={{...B(G.gold),width:"100%",marginTop:8,fontWeight:800}}>Send to {mgr?.name||"manager"}</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {L.credits.length>0&&(
+        <>
+          <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"12px 0 8px"}}>Your comp off credits</div>
+          {L.credits.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(x=>(
+            <div key={x.id} style={{...K,padding:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:13}}>{x.kind==="opening"?"Opening balance":`Worked ${fD(x.date)}`}</div>
+                <div style={{fontSize:12,color:G.mut}}>
+                  {x.kind==="work"&&(x.open?"Still checked in — credit counted after check-out · ":`${Math.floor(x.mins/60)}h ${x.mins%60}m worked · `)}
+                  expires {fD(x.expires)}
+                </div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontWeight:900,color:x.expires<=tod()?G.dim:G.gr}}>{x.left}/{x.value}</div>
+                <div style={{fontSize:10,color:G.dim}}>{x.expires<=tod()?"expired":"left"}</div>
+              </div>
+            </div>
+          ))}
+        </>
       )}
     </div>
   );
@@ -940,17 +1096,29 @@ function Hist({user,D,setSc}) {
 }
 
 function Lv({user,D,P,ST,setSc}) {
-  const [form,setForm]=useState({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
-  const pol=(D.leavePolicy||DP)[(user.employeeType||'employee')]||DP_EMP;
-  const used=t=>(D.leaves||[]).filter(l=>l.userId===user.id&&l.type===t&&l.status==="approved").length;
+  const [form,setForm]=useState({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:"",duration:"full"});
+  const polBase=(D.leavePolicy||DP)[(user.employeeType||'employee')]||DP_EMP;
+  const CO=compOffLedger(D,user);
+  // comp off is earned, not an annual quota — always offered, balance from the ledger
+  const pol={...polBase,compoff:CO.available};
+  const used=t=>t==="compoff"?0:(D.leaves||[]).filter(l=>l.userId===user.id&&l.type===t&&l.status==="approved").length;
   const tL={casual:"🏖 Casual",sick:"🤒 Sick",compoff:"🔄 CompOff",halfday:"🌓 Half Day",early:"🏃 Early"};
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const apply=()=>{
     if(!form.reason.trim())return ST("Please add a reason","error");
-    if(user.employeeType==="articled"&&form.type!=="sick"&&form.type!=="studyleave")
-      return ST("Articled Assistants can only apply Sick Leave or Study Leave (ICAI rules)","error");
+    if(user.employeeType==="articled"&&!["sick","studyleave","compoff"].includes(form.type))
+      return ST("Articled Assistants can only apply Sick, Study or Comp Off (ICAI rules)","error");
+    if(form.type==="compoff"){
+      const need=coNeed({...form,to:form.duration==="half"?form.from:form.to},holsFor(D,user),user.weeklyOff||"sun_sat");
+      if(need<=0)return ST("Those dates are all days off — nothing to apply","error");
+      const avail=CO.availableOn(form.from);
+      if(need>avail)return ST(`Need ${need} comp off, only ${avail} valid on ${fD(form.from)}`,"error");
+      addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,
+        to:form.duration==="half"?form.from:form.to,days:need,appliedOn:new Date().toISOString(),status:"pending"});
+    } else {
     if((pol[form.type]||0)-used(form.type)<=0)return ST("No leaves remaining","error");
     addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"});
+    }
     const mgr2=(D.users||[]).find(u=>u.id===user.reportingTo);
     if(mgr2)notifyLeaveReq(mgr2, user.name, form.type, form.from);
     ST("✅ Leave applied! Manager notified.");setForm({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
@@ -985,8 +1153,18 @@ function Lv({user,D,P,ST,setSc}) {
             </div>
           </FRow>
         )}
+        {form.type==="compoff"&&(
+          <FRow label={`Comp off · ${CO.available} available${CO.expiringSoon?` · ${CO.expiringSoon} expiring within 15 days`:""}`}>
+            <div style={{display:"flex",gap:8}}>
+              {[["full","Full day(s)"],["half","Half day"]].map(([v,lb])=>(
+                <button key={v} type="button" onClick={()=>setForm({...form,duration:v,to:v==="half"?form.from:form.to})}
+                  style={{...B(form.duration===v?G.gold:G.card2),flex:1,fontSize:13,border:form.duration===v?"none":`1px solid ${G.bdr}`}}>{lb}</button>
+              ))}
+            </div>
+          </FRow>
+        )}
         {form.type==="early"&&<FRow label="Early Time"><input type="time" style={I} value={form.earlyTime} onChange={e=>setForm({...form,earlyTime:e.target.value})}/></FRow>}
-        {(form.type==="halfday"||form.type==="early")
+        {(form.type==="halfday"||form.type==="early"||(form.type==="compoff"&&form.duration==="half"))
           ?<FRow label="Date"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value,to:e.target.value})}/></FRow>
           :<div style={{display:"flex",gap:8}}><FRow label="From"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value})}/></FRow><FRow label="To"><input type="date" style={I} value={form.to} onChange={e=>setForm({...form,to:e.target.value})}/></FRow></div>
         }
@@ -1071,7 +1249,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],...(user.role==="hod"?[["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
@@ -1083,6 +1261,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const mon=tod().slice(0,7);
   const pX=vu.filter(u=>{const s=leIncidents(D,u,mon);return s.exception||s.open>0;}).length;
+  const pC=(D.workApprovals||[]).filter(w=>w.status==="pending"&&vu.some(u=>u.id===w.userId)).length;
   const tp={D,P,ST,AN,vu,isA,user};
   return (
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
@@ -1100,6 +1279,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
           <button key={id} onClick={()=>setTab(id)} style={{...B(tab===id?G.gold:G.card),whiteSpace:"nowrap",fontSize:12,padding:"7px 9px",border:tab===id?"none":`1px solid ${G.bdr}`,color:tab===id?"#fff":G.mut,flexShrink:0,position:"relative",fontWeight:tab===id?800:600}}>
             {lb}
             {id==="lv"&&pL>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pL}</span>}
+            {id==="co"&&pC>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pC}</span>}
             {id==="ex"&&pX>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pX}</span>}
             {id==="rg"&&pR>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pR}</span>}
           </button>
@@ -1119,6 +1299,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="org"&&<ORG {...tp}/>}
       {tab==="br"&&isA&&<BR {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
+      {tab==="co"&&<COM {...tp}/>}
       {tab==="ex"&&(isA||isHOD)&&<EX {...tp}/>}
       {tab==="le"&&(isA||isHOD)&&<LER {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
@@ -1627,6 +1808,120 @@ function LER({D,P,ST,user,vu,isA}) {
           {canEdit(r)&&<button onClick={()=>del(r)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>Remove</button>}
         </div>
       ))}
+    </>
+  );
+}
+
+// ── Comp off management (manager approves; HR / Admin / HOD also set opening balance) ──
+function COM({D,ST,AN,user,vu,isA}) {
+  const [tab,setTab]=useState("req");
+  const [ob,setOb]=useState({userId:"",value:"",note:""});
+  const canOpening=isA||user.role==="hod";
+  const inScope=w=>vu.some(u=>u.id===w.userId);
+  const all=(D.workApprovals||[]).filter(inScope);
+  const pend=all.filter(w=>w.status==="pending").sort((a,b)=>a.date.localeCompare(b.date));
+  const appr=all.filter(w=>w.status==="approved").sort((a,b)=>b.date.localeCompare(a.date));
+  const today=tod();
+  const decide=async(w,status)=>{
+    await updateWorkApproval(w.id,{status,reviewedBy:user.id,reviewedOn:new Date().toISOString()});
+    AN(w.userId,status==="approved"
+      ?`Approved to work on ${fD(w.date)}. Check in and check out that day to earn comp off.`
+      :`Your request to work on ${fD(w.date)} was rejected.`,status==="approved"?"success":"error");
+    ST(status==="approved"?"Approved":"Rejected");
+  };
+  const cancel=async w=>{
+    const past=w.date<=today;
+    if(!confirm(past?`Cancel the comp off earned on ${fD(w.date)} by ${w.userName}?`:`Cancel approval to work on ${fD(w.date)}?`))return;
+    await updateWorkApproval(w.id,past
+      ?{creditCancelled:true,cancelledBy:user.id,cancelledOn:new Date().toISOString()}
+      :{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});
+    AN(w.userId,past?`Comp off for ${fD(w.date)} was cancelled by ${user.name}.`:`Approval to work on ${fD(w.date)} was cancelled by ${user.name}.`,"error");
+    ST("Cancelled");
+  };
+  const addOpening=async()=>{
+    const v=parseFloat(ob.value);
+    if(!ob.userId)return ST("Choose a staff member","error");
+    if(!(v>0)||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5","error");
+    await addCompOff({id:gid(),userId:ob.userId,type:"opening",value:v,date:today,note:ob.note.trim(),by:user.id,byName:user.name,on:new Date().toISOString()});
+    AN(ob.userId,`${v} comp off added to your balance by ${user.name}. Valid for 90 days.`,"success");
+    ST("Opening balance added");setOb({userId:"",value:"",note:""});
+  };
+  const credit=w=>{const u=(D.users||[]).find(x=>x.id===w.userId);if(!u)return null;return compOffLedger(D,u).credits.find(x=>x.id===w.id);};
+  return (
+    <>
+      <div style={{display:"flex",gap:6,marginBottom:10}}>
+        {[["req",`Requests${pend.length?` (${pend.length})`:""}`],["appr","Approved"],["bal","Balances"]].map(([v,lb])=>(
+          <button key={v} onClick={()=>setTab(v)} style={{...B(tab===v?G.gold:G.card),flex:1,fontSize:12,padding:"8px 6px",border:tab===v?"none":`1px solid ${G.bdr}`}}>{lb}</button>
+        ))}
+      </div>
+
+      {tab==="req"&&(<>
+        {pend.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30}}>No pending requests.</div>}
+        {pend.map(w=>(
+          <div key={w.id} style={K}>
+            <div style={{fontWeight:800}}>{w.userName}</div>
+            <div style={{fontSize:13,color:G.gold,marginTop:2}}>{fD(w.date)} · {w.dayName||"Day off"}</div>
+            <div style={{fontSize:12,color:G.mut,fontStyle:"italic",marginTop:2}}>"{w.reason}"</div>
+            <div style={{display:"flex",gap:8,marginTop:10}}>
+              <button onClick={()=>decide(w,"approved")} style={{...B(G.gr),flex:2,fontSize:13}}>Approve</button>
+              <button onClick={()=>decide(w,"rejected")} style={{...B(G.rd),flex:1,fontSize:13}}>Reject</button>
+            </div>
+          </div>
+        ))}
+      </>)}
+
+      {tab==="appr"&&(<>
+        {appr.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30}}>Nothing approved yet.</div>}
+        {appr.map(w=>{
+          const cr=w.date<=today?credit(w):null;
+          return (
+            <div key={w.id} style={{...K,opacity:w.creditCancelled?.55:1}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div>
+                  <div style={{fontWeight:800}}>{w.userName}</div>
+                  <div style={{fontSize:12,color:G.mut}}>{fD(w.date)} · {w.dayName||"Day off"}</div>
+                  <div style={{fontSize:12,marginTop:3}}>
+                    {w.date>today?"Upcoming"
+                      :w.creditCancelled?"Credit cancelled"
+                      :cr?.open?"Still checked in"
+                      :cr?`${Math.floor(cr.mins/60)}h ${cr.mins%60}m worked → ${cr.value===1?"1 day":cr.value===0.5?"½ day":"no credit"}`:"—"}
+                  </div>
+                </div>
+                {!w.creditCancelled&&<button onClick={()=>cancel(w)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>Cancel</button>}
+              </div>
+            </div>
+          );
+        })}
+      </>)}
+
+      {tab==="bal"&&(<>
+        {canOpening&&(
+          <div style={K}>
+            <div style={{fontWeight:800,marginBottom:8}}>Add opening balance</div>
+            <FRow label="Staff member">
+              <select style={I} value={ob.userId} onChange={e=>setOb({...ob,userId:e.target.value})}>
+                <option value="">Select…</option>
+                {vu.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+              </select>
+            </FRow>
+            <div style={{display:"flex",gap:8}}>
+              <FRow label="Days"><input type="number" step="0.5" min="0.5" style={I} value={ob.value} onChange={e=>setOb({...ob,value:e.target.value})}/></FRow>
+              <FRow label="Note"><input style={I} value={ob.note} onChange={e=>setOb({...ob,note:e.target.value})} placeholder="e.g. carried forward"/></FRow>
+            </div>
+            <div style={{fontSize:11,color:G.dim,marginBottom:8}}>Expires 90 days from today.</div>
+            <button onClick={addOpening} style={{...B(G.gold),width:"100%",fontWeight:800}}>Add</button>
+          </div>
+        )}
+        {vu.map(u=>{const L=compOffLedger(D,u);if(!L.credits.length&&!L.usage.length)return null;return(
+          <div key={u.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:13}}>{u.name}</div>
+              <div style={{fontSize:11,color:G.mut}}>earned {L.earned} · used {L.used} · expired {L.expired}{L.expiringSoon?` · ${L.expiringSoon} expiring soon`:""}</div>
+            </div>
+            <div style={{textAlign:"right"}}><div style={{fontSize:20,fontWeight:900,color:G.gr}}>{L.available}</div><div style={{fontSize:10,color:G.dim}}>available</div></div>
+          </div>);})}
+        {vu.every(u=>{const L=compOffLedger(D,u);return !L.credits.length&&!L.usage.length;})&&<div style={{textAlign:"center",color:G.dim,padding:24}}>No comp off balances yet.</div>}
+      </>)}
     </>
   );
 }
@@ -2340,7 +2635,7 @@ function Profile({user,D,P,ST,setSc,logout}) {
 
       {/* Profile summary card */}
       <div style={{...K,background:`linear-gradient(135deg,${G.navy},${G.navyL})`,marginBottom:12,display:"flex",gap:14,alignItems:"center"}}>
-        <div style={{width:56,height:56,borderRadius:"50%",background:G.gold,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>
+        <div style={{width:56,height:56,borderRadius:"50%",background:G.gold,color:"#fff",fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>
           {user.name?.charAt(0)?.toUpperCase()||"?"}
         </div>
         <div>
