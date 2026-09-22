@@ -129,60 +129,68 @@ export const onNotifications = (userId, cb) => onSnapshot(
 );
 
 // ── Backups ───────────────────────────────────────────────────────
-// Save timestamped backup to backups collection
-export const saveBackup = async (data) => {
-  try {
-    if (!data || !data.users || data.users.length === 0) return;
-    const key = 'backup_' + new Date().toISOString().slice(0,19).replace(/[:.T]/g,'-');
-    await setDoc(doc(db, 'backups', key), {
-      ...data,
-      backedUpAt: new Date().toISOString(),
-      userCount: data.users.length
-    });
-    console.log('✅ Backup saved:', key, 'Users:', data.users.length);
-    // Auto-cleanup: keep only last 30 backups
-    const all = await getDocs(collection(db, 'backups'));
-    const sorted = all.docs
-      .map(d => ({ id: d.id, at: d.data().backedUpAt || '' }))
-      .sort((a,b) => b.at.localeCompare(a.at));
-    if (sorted.length > 30) {
-      const toDelete = sorted.slice(30);
-      await Promise.all(toDelete.map(b => deleteDoc(doc(db, 'backups', b.id))));
-    }
-  } catch(e) {
-    console.warn('Backup failed:', e.message);
-  }
+// A backup holds SETTINGS ONLY (staff, offices, teams, policies, holidays,
+// rules, balances) — never attendance, selfies or notifications, which live in
+// their own collections and are not touched by a restore.
+// The list of backups is kept in one small document (backups/_index) so the
+// Backups screen loads instantly instead of downloading every backup.
+const BACKUP_FIELDS = ['users','offices','teams','branches','leavePolicy','holidays','holidayCalendars',
+  'leRules','leaveOpenings','companyName','firmId','firmPlan','firmTrial'];
+const KEEP_BACKUPS = 30;
+const pickConfig = (data) => {
+  const out = {};
+  BACKUP_FIELDS.forEach(k => { if (data && data[k] !== undefined) out[k] = data[k]; });
+  return JSON.parse(JSON.stringify(out, (k, v) => v === undefined ? null : v));
+};
+const indexRef = () => doc(db, 'backups', '_index');
+const readIndex = async () => {
+  const s = await getDoc(indexRef());
+  return s.exists() && Array.isArray(s.data().items) ? s.data().items : [];
 };
 
-// Get list of all backups
-export const getBackups = async () => {
-  try {
-    const snap = await getDocs(collection(db, 'backups'));
-    return snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .sort((a,b) => b.backedUpAt?.localeCompare(a.backedUpAt));
-  } catch(e) {
-    console.warn('Get backups failed:', e.message);
-    return [];
-  }
+// Returns the backup's list entry. Throws if it could not be saved, so the
+// screen never claims success when the save failed.
+export const saveBackup = async (data, reason = 'auto') => {
+  const cfg = pickConfig(data);
+  if (!cfg.users || cfg.users.length === 0) throw new Error('Nothing to back up (no staff loaded yet)');
+  const at = new Date().toISOString();
+  const id = 'backup_' + at.slice(0, 23).replace(/[:.T]/g, '-');   // includes milliseconds
+  const sizeKB = Math.round(JSON.stringify(cfg).length / 1024);
+  const entry = { id, backedUpAt: at, userCount: cfg.users.length, offices: (cfg.offices || []).length,
+    teams: (cfg.teams || []).length, sizeKB, reason };
+  await setDoc(doc(db, 'backups', id), { ...cfg, backedUpAt: at, userCount: entry.userCount, reason });
+  // Update the list, keep the newest 30, delete the rest by id (no downloads)
+  const items = [entry, ...(await readIndex()).filter(x => x.id !== id)]
+    .sort((a, b) => b.backedUpAt.localeCompare(a.backedUpAt));
+  const keep = items.slice(0, KEEP_BACKUPS), drop = items.slice(KEEP_BACKUPS);
+  await setDoc(indexRef(), { items: keep, updatedAt: at });
+  await Promise.all(drop.map(x => deleteDoc(doc(db, 'backups', x.id)).catch(() => {})));
+  return entry;
 };
 
-// Restore from a specific backup
+// The list comes from the small index document — fast on any phone
+export const getBackups = async () => readIndex();
+
+// Backups made by older versions of the app are not in the list. This fetches
+// the newest few of them, on request only.
+export const getOlderBackups = async (n = 5) => {
+  const known = new Set((await readIndex()).map(x => x.id));
+  const snap = await getDocs(query(collection(db, 'backups'), orderBy('backedUpAt', 'desc'), limit(n + known.size)));
+  return snap.docs
+    .filter(d => d.id !== '_index' && !known.has(d.id))
+    .slice(0, n)
+    .map(d => { const x = d.data(); return { id: d.id, backedUpAt: x.backedUpAt, userCount: (x.users || []).length,
+      offices: (x.offices || []).length, teams: (x.teams || []).length, legacy: true }; });
+};
+
+// Restores SETTINGS only. Attendance, leave applications etc. are untouched.
 export const restoreBackup = async (backupId) => {
-  try {
-    const snap = await getDoc(doc(db, 'backups', backupId));
-    if (!snap.exists()) throw new Error('Backup not found');
-    const data = snap.data();
-    if (!data.users || data.users.length === 0) throw new Error('Backup has no users');
-    // Remove backup metadata before restoring
-    const { backedUpAt, userCount, ...configData } = data;
-    await setDoc(doc(db, 'app', 'config'), configData);
-    console.log('✅ Restored from backup:', backupId);
-    return configData;
-  } catch(e) {
-    console.error('Restore failed:', e.message);
-    throw e;
-  }
+  const snap = await getDoc(doc(db, 'backups', backupId));
+  if (!snap.exists()) throw new Error('Backup not found');
+  const cfg = pickConfig(snap.data());
+  if (!cfg.users || cfg.users.length === 0) throw new Error('Backup has no staff — not restoring');
+  await setDoc(doc(db, 'app', 'config'), cfg);
+  return cfg;
 };
 
 // ── Work Approvals ────────────────────────────────────────────────
@@ -211,21 +219,11 @@ export const onCompOffs = (cb) => onSnapshot(
 
 // ── Backup cleanup ────────────────────────────────────────────────
 export const cleanupBackups = async () => {
-  try {
-    const all = await getDocs(collection(db, 'backups'));
-    const sorted = all.docs
-      .map(d => ({ id: d.id, at: d.data().backedUpAt || '' }))
-      .sort((a,b) => b.at.localeCompare(a.at));
-    if (sorted.length > 30) {
-      const toDelete = sorted.slice(30);
-      await Promise.all(toDelete.map(b => deleteDoc(doc(db, 'backups', b.id))));
-      return toDelete.length;
-    }
-    return 0;
-  } catch(e) {
-    console.warn('Cleanup failed:', e.message);
-    return 0;
-  }
+  const items = await readIndex();
+  const drop = items.slice(KEEP_BACKUPS);
+  await Promise.all(drop.map(x => deleteDoc(doc(db, 'backups', x.id)).catch(() => {})));
+  if (drop.length) await setDoc(indexRef(), { items: items.slice(0, KEEP_BACKUPS), updatedAt: new Date().toISOString() });
+  return drop.length;
 };
 
 // ── User Passwords (separate from config so restores don't affect them) ──

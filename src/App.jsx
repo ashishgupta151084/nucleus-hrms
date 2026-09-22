@@ -6,7 +6,7 @@ import {
   addReg, updateReg, onRegs,
   updateLiveLocation, onLiveLocations,
   addNotification, updateNotification, onNotifications,
-  saveBackup, getBackups, restoreBackup,
+  saveBackup, getBackups, getOlderBackups, restoreBackup,
   addWorkApproval, updateWorkApproval, onWorkApprovals,
   addCompOff, updateCompOff, onCompOffs
 } from "./firebase";
@@ -209,7 +209,7 @@ const leaveBalances=(D,user)=>{
   const [ys,ye]=leaveYear(tod());
   const out=[];
   LEAVE_TYPES.forEach(([t,label])=>{
-    if(t==="compoff"){ out.push({type:t,label,total:null,left:compOffLedger(D,user).available}); return; }
+    if(t==="compoff"){ const L=compOffLedger(D,user); out.push({type:t,label,total:null,left:L.available,used:L.used,opening:L.opening}); return; }
     if(isAA){
       // Articled: earned per completed month of articleship, never resets
       if(!["sick","studyleave"].includes(t))return;
@@ -340,20 +340,24 @@ const coNeed=(l,hols,wo)=>{
 const compOffLedger=(D,user)=>{
   const today=tod(), sh=shiftFor(D,user), full=shiftMinsOf(sh);
   const hols=holsFor(D,user), wo=user?.weeklyOff||"sun_sat";
+  // A balance set by HR/HOD "as on" a date replaces everything earned or used up to that date
+  const op=openingFor(D,user.id,"compoff");
   const credits=[];
-  (D.workApprovals||[]).filter(w=>w.userId===user.id&&w.status==="approved"&&!w.creditCancelled&&w.date<=today).forEach(w=>{
+  if(op) credits.push({id:op.id,kind:"set",date:op.asOn,value:Number(op.days)||0,mins:0,open:false,
+    expires:addDays(op.asOn,CO_DAYS),note:op.note,byName:op.byName});
+  (D.workApprovals||[]).filter(w=>w.userId===user.id&&w.status==="approved"&&!w.creditCancelled&&w.date<=today&&(!op||w.date>op.asOn)).forEach(w=>{
     const recs=(D.attendance||[]).filter(a=>a.userId===user.id&&a.date===w.date&&a.checkIn);
     const mins=recs.filter(a=>a.checkOut).reduce((s,a)=>s+wMin(a.checkIn,a.checkOut),0);
     const open=recs.some(a=>!a.checkOut);
     const r=mins/full, value=r>=CO_FULL?1:r>=CO_HALF?0.5:0;
     credits.push({id:w.id,kind:"work",date:w.date,value,mins,open,expires:addDays(w.date,CO_DAYS)});
   });
-  (D.compoffs||[]).filter(x=>x.userId===user.id&&x.type==="opening"&&!x.cancelled).forEach(x=>{
+  (D.compoffs||[]).filter(x=>x.userId===user.id&&x.type==="opening"&&!x.cancelled&&(!op||x.date>op.asOn)).forEach(x=>{
     credits.push({id:x.id,kind:"opening",date:x.date,value:Number(x.value)||0,mins:0,open:false,expires:addDays(x.date,CO_DAYS),note:x.note});
   });
   credits.sort((a,b)=>a.expires.localeCompare(b.expires)||a.date.localeCompare(b.date));
   credits.forEach(x=>x.left=x.value);
-  const uses=(D.leaves||[]).filter(l=>l.userId===user.id&&l.type==="compoff"&&(l.status==="approved"||l.status==="pending"))
+  const uses=(D.leaves||[]).filter(l=>l.userId===user.id&&l.type==="compoff"&&(l.status==="approved"||l.status==="pending")&&(!op||l.from>op.asOn))
     .sort((a,b)=>a.from.localeCompare(b.from));
   const usage=uses.map(l=>{
     let need=coNeed(l,hols,wo); const want=need;
@@ -367,7 +371,7 @@ const compOffLedger=(D,user)=>{
   const live=credits.filter(x=>x.left>0&&x.expires>today);
   const soon=addDays(today,15);
   return {
-    credits,usage,
+    credits,usage,opening:op,
     available:live.reduce((s,x)=>s+x.left,0),
     expiringSoon:live.filter(x=>x.expires<=soon).reduce((s,x)=>s+x.left,0),
     expired:credits.filter(x=>x.left>0&&x.expires<=today).reduce((s,x)=>s+x.left,0),
@@ -580,7 +584,8 @@ export default function App() {
     // Only write if something actually changed
     if(Object.keys(changes).length===0&&Object.keys(arrayChanges).length===0)return;
 
-    saveBackup(configData).catch(()=>{});
+    // Safety copy before a settings change — at most once an hour
+    if(Date.now()-(window.__nuLastBk||0)>60*60*1000){ window.__nuLastBk=Date.now(); saveBackup(D,"before change").catch(()=>{}); }
     setConfig({changes,arrayChanges,initialConfig:configData}).catch(error=>{
       console.error("Config save failed:",error);
     });
@@ -1085,7 +1090,7 @@ function WorkReq({user,D,ST,AN,setSc}) {
           {L.credits.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(x=>(
             <div key={x.id} style={{...K,padding:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
-                <div style={{fontWeight:700,fontSize:13}}>{x.kind==="opening"?"Opening balance":`Worked ${fD(x.date)}`}</div>
+                <div style={{fontWeight:700,fontSize:13}}>{x.kind==="set"?`Balance set as on ${fD(x.date)}`:x.kind==="opening"?"Opening balance":`Worked ${fD(x.date)}`}</div>
                 <div style={{fontSize:12,color:G.mut}}>
                   {x.kind==="work"&&(x.open?"Still checked in — counted after check-out · ":`${Math.floor(x.mins/60)}h ${x.mins%60}m worked · `)}
                   expires {fD(x.expires)}
@@ -2045,20 +2050,8 @@ function COM({D,ST,AN,user,vu,isA}) {
 
       {tab==="bal"&&(<>
         {canOpening&&(
-          <div style={K}>
-            <div style={{fontWeight:800,marginBottom:8}}>Add opening balance</div>
-            <FRow label="Staff member">
-              <select style={I} value={ob.userId} onChange={e=>setOb({...ob,userId:e.target.value})}>
-                <option value="">Select…</option>
-                {vu.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
-              </select>
-            </FRow>
-            <div style={{display:"flex",gap:8}}>
-              <FRow label="Days"><input type="number" step="0.5" min="0.5" style={I} value={ob.value} onChange={e=>setOb({...ob,value:e.target.value})}/></FRow>
-              <FRow label="Note"><input style={I} value={ob.note} onChange={e=>setOb({...ob,note:e.target.value})} placeholder="e.g. carried forward"/></FRow>
-            </div>
-            <div style={{fontSize:11,color:G.dim,marginBottom:8}}>Expires 90 days from today.</div>
-            <button onClick={addOpening} style={{...B(G.gold),width:"100%",fontWeight:800}}>Add</button>
+          <div style={{...K,background:G.card2,fontSize:12,color:G.mut}}>
+            To set or correct someone's comp off balance, use the <b>Leave balances</b> tab.
           </div>
         )}
         {vu.map(u=>{const L=compOffLedger(D,u);if(!L.credits.length&&!L.usage.length)return null;return(
@@ -2080,8 +2073,8 @@ function LB({D,P,ST,AN,user,vu}) {
   const staff=vu.filter(u=>u.role!=="admin"&&u.id!==user.id);   // nobody sets their own balance
   const [uid,setUid]=useState(staff[0]?.id||"");
   const u=staff.find(x=>x.id===uid);
-  const bal=u?leaveBalances(D,u).filter(b=>b.type!=="compoff"):[];
-  const types=u?(u.employeeType==="articled"?[["sick","Sick"],["studyleave","Study"]]:[["casual","Casual"],["sick","Sick"]]):[];
+  const bal=u?leaveBalances(D,u):[];
+  const types=u?(u.employeeType==="articled"?[["sick","Sick"],["studyleave","Study"],["compoff","Comp Off"]]:[["casual","Casual"],["sick","Sick"],["compoff","Comp Off"]]):[];
   const [f,setF]=useState({type:"",days:"",asOn:tod(),note:""});
   const hist=(D.leaveOpenings||[]).filter(o=>o.userId===uid).sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""));
   const save=()=>{
@@ -2104,7 +2097,7 @@ function LB({D,P,ST,AN,user,vu}) {
         <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave balances as on date</div>
         <div style={{color:G.dim,fontSize:12,marginTop:3}}>
           Enter each person's balance as on a date (e.g. when you start using this app). From the next day, the app deducts leave applied and, for articled assistants, adds leave earned each month.
-          Employee balances still reset on 1 April.
+          Employee balances still reset on 1 April. Comp off expires 90 days after it is earned or set.
         </div>
       </div>
 
@@ -2123,7 +2116,7 @@ function LB({D,P,ST,AN,user,vu}) {
                 <div style={{fontSize:10,color:G.mut,fontWeight:700,textTransform:"uppercase"}}>{b.label}</div>
                 <div style={{fontSize:20,fontWeight:900,color:b.left>0?G.txt:G.rd}}>{b.left}</div>
                 <div style={{fontSize:10,color:G.dim}}>
-                  {b.opening?`${b.opening.days} as on ${fD(b.opening.asOn)}`:b.accrual?`${b.accrual.rate}/mo × ${b.accrual.months} mo`:`of ${b.total} this year`}
+                  {b.opening?`${b.opening.days} as on ${fD(b.opening.asOn)}`:b.accrual?`${b.accrual.rate}/mo × ${b.accrual.months} mo`:b.total===null?"earned":`of ${b.total} this year`}
                   {b.opening&&b.accrual?.months?` + ${b.accrual.months*b.accrual.rate} earned`:""}
                   {b.used?` − ${b.used} used`:""}
                 </div>
@@ -2149,6 +2142,7 @@ function LB({D,P,ST,AN,user,vu}) {
           </div>
           <div style={{fontSize:11,color:G.dim,marginBottom:8}}>
             Leave on or before the as-on date is treated as already included in this figure.
+            {(f.type||types[0]?.[0])==="compoff"&&" Comp off set here expires 90 days after the as-on date; comp off earned later is added on top."}
           </div>
           <button onClick={save} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save balance</button>
         </div>
@@ -3223,98 +3217,79 @@ function BR({D,P,ST}) {
 }
 
 
-function BK({D,P,ST}) {
-  const [backups,setBackups]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const [restoring,setRestoring]=useState(null);
-
-  const loadBackups=()=>{
-    setLoading(true);
-    getBackups()
-      .then(b=>{
-        console.log("Backups loaded:", b.length, b);
-        setBackups(b);
-        setLoading(false);
-      })
-      .catch(e=>{
-        console.error("Failed to load backups:", e);
-        ST("Could not load backups: "+e.message,"error");
-        setLoading(false);
-      });
+function BK({D,ST}) {
+  const [list,setList]=useState([]);
+  const [older,setOlder]=useState([]);
+  const [state,setState]=useState("loading");   // loading | ready | error
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState("");
+  const withTimeout=(p,ms=20000)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error("No response from server — check internet and tap Refresh")),ms))]);
+  const load=async()=>{
+    setState("loading");setErr("");
+    try{ setList(await withTimeout(getBackups())); setState("ready"); }
+    catch(e){ setErr(e.message); setState("error"); }
   };
-
-  useEffect(()=>{loadBackups();},[]);
-
-  const doBackup=async()=>{
-    ST("💾 Creating backup...");
-    try{
-      await saveBackup(D);
-      await loadBackups();
-      ST("✅ Backup created! "+D.users?.length+" users saved.");
-    }catch(e){
-      ST("Backup failed: "+e.message,"error");
-    }
+  useEffect(()=>{load();},[]);
+  const backupNow=async()=>{
+    setBusy("backup");
+    try{ const x=await withTimeout(saveBackup(D,"manual")); ST(`✅ Backup saved — ${x.userCount} staff, ${x.offices} office${x.offices===1?"":"s"}`); await load(); }
+    catch(e){ ST("❌ Backup failed: "+e.message,"error"); }
+    setBusy("");
   };
-
-  const doRestore=async(b)=>{
-    if(!confirm(`Restore backup from ${new Date(b.backedUpAt).toLocaleString("en-IN")}?\n\n${b.userCount||b.users?.length||0} users will be restored.\n\nClick OK to confirm.`))return;
-    setRestoring(b.id);
-    try{
-      const cfg=await restoreBackup(b.id);
-      P({...D,...cfg});
-      ST("✅ Restored successfully! Reloading...");
-      setTimeout(()=>window.location.reload(),2000);
-    }catch(e){
-      ST("Restore failed: "+e.message,"error");
-    }
-    setRestoring(null);
+  const loadOlder=async()=>{
+    setBusy("older");
+    try{ const o=await withTimeout(getOlderBackups(5),30000); setOlder(o); if(!o.length)ST("No older backups found"); }
+    catch(e){ ST("❌ "+e.message,"error"); }
+    setBusy("");
   };
-
+  const restore=async(b)=>{
+    if(!confirm(`Restore settings from ${new Date(b.backedUpAt).toLocaleString("en-IN")}?\n\nStaff, offices, teams, policies, holidays and balances will go back to that point.\nAttendance and leave applications are NOT affected.`))return;
+    setBusy(b.id);
+    try{ await withTimeout(restoreBackup(b.id)); ST("✅ Restored — reloading…"); setTimeout(()=>window.location.reload(),1500); }
+    catch(e){ ST("❌ Restore failed: "+e.message,"error"); setBusy(""); }
+  };
+  const row=(b)=>(
+    <div key={b.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+      <div style={{minWidth:0}}>
+        <div style={{fontWeight:700,fontSize:13}}>{new Date(b.backedUpAt).toLocaleString("en-IN",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}</div>
+        <div style={{fontSize:11,color:G.mut}}>
+          {b.userCount} staff · {b.offices} office{b.offices===1?"":"s"} · {b.teams} team{b.teams===1?"":"s"}{b.sizeKB!=null?` · ${b.sizeKB} KB`:""}
+          {b.reason?` · ${b.reason}`:""}{b.legacy?" · older format":""}
+        </div>
+      </div>
+      <button disabled={!!busy} onClick={()=>restore(b)} style={{...B(G.am),fontSize:12,padding:"7px 12px",flexShrink:0,opacity:busy&&busy!==b.id?.5:1}}>
+        {busy===b.id?"Restoring…":"Restore"}
+      </button>
+    </div>
+  );
   return (
     <>
-      <div style={{...K,background:"#e9f7ef",border:`1px solid ${G.gr}`}}>
-        <div style={{color:G.gr,fontWeight:800,fontSize:14}}>💾 Backup & Restore</div>
-        <div style={{color:G.dim,fontSize:12,marginTop:4}}>Auto-backup runs daily. You can also create manual backups anytime and restore to any previous backup.</div>
+      <div style={{...K,background:G.card2}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Backup & restore</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Backups hold settings only — staff, offices, teams, policies, holidays, rules and balances. Taken automatically twice a day
+          and before settings changes (at most hourly). Last 30 are kept. Attendance and leave records are stored separately and are never touched by a restore.
+        </div>
       </div>
-
       <div style={{display:"flex",gap:8,marginBottom:12}}>
-        <button onClick={doBackup} style={{...B(`linear-gradient(135deg,${G.gr},#059669)`),flex:2,fontWeight:800}}>💾 Backup Now</button>
-        <button onClick={loadBackups} style={{...B(G.navyL),flex:1,border:`1px solid ${G.bdr}`,fontSize:12}}>🔄 Refresh</button>
+        <button disabled={!!busy} onClick={backupNow} style={{...B(G.gr),flex:2,fontWeight:800}}>{busy==="backup"?"Saving…":"Backup now"}</button>
+        <button disabled={!!busy} onClick={load} style={{...B(G.card),flex:1,border:`1px solid ${G.bdr}`,fontSize:13}}>Refresh</button>
       </div>
-
-      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>
-        {loading?"Loading...":backups.length===0?"No backups found":`${backups.length} backups available`}
-      </div>
-
-      {backups.map(b=>(
-        <div key={b.id} style={{...K,border:`1px solid ${G.bdr}`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontWeight:700,fontSize:12,color:G.gold}}>
-                📅 {new Date(b.backedUpAt).toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})} {new Date(b.backedUpAt).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}
-              </div>
-              <div style={{fontSize:11,color:G.mut,marginTop:2}}>
-                👥 {b.userCount||b.users?.length||0} users · 🏢 {b.offices?.length||0} offices · 🏷 {b.teams?.length||0} teams
-              </div>
-            </div>
-            <button
-              onClick={()=>doRestore(b)}
-              disabled={!!restoring}
-              style={{...B(restoring===b.id?G.dim:G.am),color:"#fff",fontSize:11,fontWeight:800,padding:"7px 12px",flexShrink:0}}
-            >
-              {restoring===b.id?"⏳ Restoring...":"↩️ Restore"}
-            </button>
-          </div>
-        </div>
-      ))}
-
-      {!loading&&backups.length===0&&(
-        <div style={{textAlign:"center",padding:32,color:G.dim}}>
-          <div style={{fontSize:48,marginBottom:8}}>💾</div>
-          <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>No backups yet</div>
-          <div style={{fontSize:12}}>Click "Backup Now" to create your first backup</div>
-        </div>
+      {state==="loading"&&<div style={{textAlign:"center",color:G.dim,padding:24}}>Loading backups…</div>}
+      {state==="error"&&(
+        <div style={{...K,background:"#fdecea",border:`1px solid ${G.rd}`,color:G.rd,fontSize:13}}>Couldn't load backups. {err}</div>
       )}
+      {state==="ready"&&(<>
+        <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>{list.length} backup{list.length===1?"":"s"}</div>
+        {list.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20,fontSize:13}}>No backups in the new format yet. Tap <b>Backup now</b> to create one.</div>}
+        {list.map(row)}
+        <div style={{marginTop:6}}>
+          <button disabled={!!busy} onClick={loadOlder} style={{...B(G.card),width:"100%",border:`1px dashed ${G.bdr}`,fontSize:12}}>
+            {busy==="older"?"Looking…":"Show backups made by the older app version"}
+          </button>
+        </div>
+        {older.map(row)}
+      </>)}
     </>
   );
 }
