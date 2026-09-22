@@ -15,10 +15,10 @@ import {
 const clean = (obj) => JSON.parse(JSON.stringify(obj, (k, v) => v === undefined ? null : v));
 
 const CONFIG_FIELDS = [
-  "users", "offices", "teams", "branches", "leavePolicy", "holidays", "holidayCalendars", "leRules",
+  "users", "offices", "teams", "branches", "leavePolicy", "holidays", "holidayCalendars", "leRules", "leaveOpenings",
   "companyName", "firmId", "firmPlan", "firmTrial"
 ];
-const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays", "holidayCalendars", "leRules"]);
+const CONFIG_RECORD_FIELDS = new Set(["users", "offices", "teams", "branches", "holidays", "holidayCalendars", "leRules", "leaveOpenings"]);
 
 const configFrom = data => clean({
   users: data.users || [],
@@ -29,6 +29,7 @@ const configFrom = data => clean({
   holidays: data.holidays || [],
   holidayCalendars: data.holidayCalendars || [],
   leRules: data.leRules || [],
+  leaveOpenings: data.leaveOpenings || [],
   companyName: data.companyName || "Nucleus HRMS",
   firmId: data.firmId || null,
   firmPlan: data.firmPlan || null,
@@ -198,6 +199,10 @@ const monthsServed=(start,today)=>{
   const [sy,sm,sd]=start.split("-").map(Number),[ty,tm,td]=today.split("-").map(Number);
   return Math.max(0,(ty-sy)*12+(tm-sm)-(td<sd?1:0));
 };
+// Latest "balance as on date" set by HR / HOD for one person and leave type
+const openingFor=(D,uid,t)=>(D.leaveOpenings||[])
+  .filter(o=>o.userId===uid&&o.type===t&&o.asOn<=tod())
+  .sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""))[0]||null;
 const leaveBalances=(D,user)=>{
   const isAA=user?.employeeType==="articled";
   const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
@@ -210,13 +215,36 @@ const leaveBalances=(D,user)=>{
       if(!["sick","studyleave"].includes(t))return;
       const rate=Number(pol[t+"PerMonth"]??(isAA?DP_AA:DP_EMP)[t+"PerMonth"])||0; if(rate<=0)return;
       const start=user.articleshipStart||null;
+      const op=openingFor(D,user.id,t);
+      const counted=(from)=>(D.leaves||[])
+        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&l.type===t&&(!from||(l.to||l.from)>=from))
+        .reduce((s,l)=>s+leaveDays(l,D,user,from||undefined),0);
+      if(op){
+        // Balance fixed by HR on op.asOn; afterwards add months earned and subtract leave taken
+        const after=addDays(op.asOn,1);
+        const mAfter=start?Math.max(0,monthsServed(start,tod())-monthsServed(start,op.asOn)):monthsServed(op.asOn,tod());
+        const total=Math.round((Number(op.days)+mAfter*rate)*10)/10;
+        const used=counted(after);
+        out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),
+          accrual:{rate,months:mAfter,start},opening:op});
+        return;
+      }
       const months=monthsServed(start,tod());
       const total=Math.round(months*rate*10)/10;
-      const used=(D.leaves||[])
-        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&l.type===t&&(!start||(l.to||l.from)>=start))
-        .reduce((s,l)=>s+leaveDays(l,D,user,start||undefined),0);
+      const used=counted(start);
       out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),
         accrual:{rate,months,start}});
+      return;
+    }
+    const op=openingFor(D,user.id,t);
+    if(op&&op.asOn>=ys&&op.asOn<ye){
+      // HR fixed the balance on op.asOn; count only leave after that date, within this leave year
+      const after=addDays(op.asOn,1);
+      const used=(D.leaves||[])
+        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&(l.type===t||(t==="casual"&&l.type==="halfday")))
+        .reduce((s,l)=>s+leaveDays(l,D,user,after,ye),0);
+      const total=Number(op.days)||0;
+      out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),opening:op});
       return;
     }
     const total=Number(pol[t])||0; if(total<=0)return;
@@ -585,7 +613,13 @@ export default function App() {
   };
   const logout=()=>{setCu(null);sv("nau5",null);setSc("login");};
   const unread=(D.notifications||[]).filter(n=>n.userId===cu?.id&&!n.read).length;
-  const props={user:cu,D,P,ST,AN,logout,setSc,unread};
+  // Always use the latest profile from the database, not the copy saved at login.
+  // Otherwise changes made by HR (offices, team, weekly off, calendar, articleship
+  // start date…) never reach a person who is already logged in.
+  const live=cu?(D.users||[]).find(u=>u.id===cu.id):null;
+  const me=cu?{...cu,...(live||{})}:null;
+  useEffect(()=>{ if(cu&&live&&JSON.stringify(live)!==JSON.stringify(cu)) sv("nau5",{...cu,...live}); },[live]);
+  const props={user:me,D,P,ST,AN,logout,setSc,unread};
   // Show loading overlay after login until Firebase data arrives
   if(cu && !D.loaded) return (
     <div style={{minHeight:"100vh",background:G.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,fontFamily:"'Nunito',sans-serif"}}>
@@ -890,7 +924,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       </div>
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],...(user.role==="manager"?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -1232,7 +1266,9 @@ function Lv({user,D,ST,setSc}) {
               <div style={{fontSize:10,color:G.mut,textTransform:"uppercase",fontWeight:700}}>{b.label}</div>
               <div style={{fontSize:20,fontWeight:900,color:b.left>0?G.txt:G.rd}}>{b.left}</div>
               <div style={{fontSize:10,color:G.dim}}>{b.total===null?"earned":`of ${b.total}`}</div>
-              {b.accrual&&<div style={{fontSize:9,color:G.dim,marginTop:2}}>{b.accrual.rate}/month × {b.accrual.months} mo</div>}
+              {b.opening
+                ?<div style={{fontSize:9,color:G.dim,marginTop:2}}>{b.opening.days} as on {fD(b.opening.asOn)}{b.accrual?.months?` + ${b.accrual.months*b.accrual.rate} earned`:""}</div>
+                :b.accrual&&<div style={{fontSize:9,color:G.dim,marginTop:2}}>{b.accrual.rate}/month × {b.accrual.months} mo</div>}
             </div>
           ))}
         </div>
@@ -1361,7 +1397,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
@@ -1412,6 +1448,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="br"&&isA&&<BR {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="co"&&<COM {...tp}/>}
+      {tab==="lb"&&(isA||isHOD)&&<LB {...tp}/>}
       {tab==="ex"&&(isA||isHOD)&&<EX {...tp}/>}
       {tab==="le"&&(isA||isHOD)&&<LER {...tp}/>}
       {tab==="rst"&&isA&&<RST {...tp} logout={logout}/>}
@@ -2033,6 +2070,106 @@ function COM({D,ST,AN,user,vu,isA}) {
             <div style={{textAlign:"right"}}><div style={{fontSize:20,fontWeight:900,color:G.gr}}>{L.available}</div><div style={{fontSize:10,color:G.dim}}>available</div></div>
           </div>);})}
         {vu.every(u=>{const L=compOffLedger(D,u);return !L.credits.length&&!L.usage.length;})&&<div style={{textAlign:"center",color:G.dim,padding:24}}>No comp off balances yet.</div>}
+      </>)}
+    </>
+  );
+}
+
+// ── Leave balances as on date (HR / Admin: everyone; HOD: own teams) ──
+function LB({D,P,ST,AN,user,vu}) {
+  const staff=vu.filter(u=>u.role!=="admin"&&u.id!==user.id);   // nobody sets their own balance
+  const [uid,setUid]=useState(staff[0]?.id||"");
+  const u=staff.find(x=>x.id===uid);
+  const bal=u?leaveBalances(D,u).filter(b=>b.type!=="compoff"):[];
+  const types=u?(u.employeeType==="articled"?[["sick","Sick"],["studyleave","Study"]]:[["casual","Casual"],["sick","Sick"]]):[];
+  const [f,setF]=useState({type:"",days:"",asOn:tod(),note:""});
+  const hist=(D.leaveOpenings||[]).filter(o=>o.userId===uid).sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""));
+  const save=()=>{
+    const t=f.type||types[0]?.[0];
+    const v=parseFloat(f.days);
+    if(!u)return ST("Choose a staff member","error");
+    if(isNaN(v)||v<0||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5","error");
+    if(!f.asOn||f.asOn>tod())return ST("As-on date cannot be in the future","error");
+    const rec={id:`lo_${u.id}_${t}_${f.asOn}`,userId:u.id,type:t,days:v,asOn:f.asOn,note:f.note.trim(),
+      by:user.id,byName:user.name,on:new Date().toISOString()};
+    P({...D,leaveOpenings:[...(D.leaveOpenings||[]).filter(o=>o.id!==rec.id),rec]});
+    AN(u.id,`Your ${LEAVE_LABEL[t]} leave balance was set to ${v} day${v===1?"":"s"} as on ${fD(f.asOn)} by ${user.name}.`,"info");
+    ST("Balance saved");setF({...f,days:"",note:""});
+  };
+  const del=o=>{if(!confirm(`Remove the ${LEAVE_LABEL[o.type]} balance set as on ${fD(o.asOn)}?`))return;
+    P({...D,leaveOpenings:(D.leaveOpenings||[]).filter(x=>x.id!==o.id)});ST("Removed");};
+  return (
+    <>
+      <div style={{...K,background:G.card2}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave balances as on date</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Enter each person's balance as on a date (e.g. when you start using this app). From the next day, the app deducts leave applied and, for articled assistants, adds leave earned each month.
+          Employee balances still reset on 1 April.
+        </div>
+      </div>
+
+      <FRow label="Staff member">
+        <select style={I} value={uid} onChange={e=>{setUid(e.target.value);setF({...f,type:""});}}>
+          {staff.map(s=><option key={s.id} value={s.id}>{s.name}{s.employeeType==="articled"?" (Articled)":""}</option>)}
+        </select>
+      </FRow>
+
+      {u&&(<>
+        <div style={K}>
+          <div style={{fontWeight:800,marginBottom:8}}>Current balance</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {bal.map(b=>(
+              <div key={b.type} style={{flex:"1 1 110px",background:G.card2,borderRadius:10,padding:"8px 10px",border:`1px solid ${G.bdr}`}}>
+                <div style={{fontSize:10,color:G.mut,fontWeight:700,textTransform:"uppercase"}}>{b.label}</div>
+                <div style={{fontSize:20,fontWeight:900,color:b.left>0?G.txt:G.rd}}>{b.left}</div>
+                <div style={{fontSize:10,color:G.dim}}>
+                  {b.opening?`${b.opening.days} as on ${fD(b.opening.asOn)}`:b.accrual?`${b.accrual.rate}/mo × ${b.accrual.months} mo`:`of ${b.total} this year`}
+                  {b.opening&&b.accrual?.months?` + ${b.accrual.months*b.accrual.rate} earned`:""}
+                  {b.used?` − ${b.used} used`:""}
+                </div>
+              </div>
+            ))}
+            {bal.length===0&&<div style={{fontSize:12,color:G.mut}}>No leave types configured for this person.</div>}
+          </div>
+        </div>
+
+        <div style={K}>
+          <div style={{fontWeight:800,marginBottom:8}}>Set balance</div>
+          <div style={{display:"flex",gap:8}}>
+            <FRow label="Leave type">
+              <select style={I} value={f.type||types[0]?.[0]||""} onChange={e=>setF({...f,type:e.target.value})}>
+                {types.map(([t,lb])=><option key={t} value={t}>{lb}</option>)}
+              </select>
+            </FRow>
+            <FRow label="Balance (days)"><input type="number" step="0.5" min="0" style={I} value={f.days} onChange={e=>setF({...f,days:e.target.value})} placeholder="e.g. 7.5"/></FRow>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <FRow label="As on date"><input type="date" style={I} max={tod()} value={f.asOn} onChange={e=>setF({...f,asOn:e.target.value})}/></FRow>
+            <FRow label="Note (optional)"><input style={I} value={f.note} onChange={e=>setF({...f,note:e.target.value})} placeholder="e.g. from old register"/></FRow>
+          </div>
+          <div style={{fontSize:11,color:G.dim,marginBottom:8}}>
+            Leave on or before the as-on date is treated as already included in this figure.
+          </div>
+          <button onClick={save} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save balance</button>
+        </div>
+
+        {hist.length>0&&(
+          <div style={K}>
+            <div style={{fontWeight:800,marginBottom:6}}>History</div>
+            {hist.map(o=>{
+              const active=openingFor(D,uid,o.type)?.id===o.id;
+              return(
+                <div key={o.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${G.bdr}`,padding:"8px 0"}}>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700}}>{LEAVE_LABEL[o.type]}: {o.days} as on {fD(o.asOn)} {active&&<span style={{fontSize:10,color:G.gr}}>● in use</span>}</div>
+                    <div style={{fontSize:11,color:G.mut}}>by {o.byName||"—"}{o.note?` · ${o.note}`:""}</div>
+                  </div>
+                  <button onClick={()=>del(o)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"4px 8px"}}>Remove</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </>)}
     </>
   );
