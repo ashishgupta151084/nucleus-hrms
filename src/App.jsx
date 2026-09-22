@@ -172,6 +172,61 @@ const daysOfMonth=(y,m)=>{
   for(let d=1;d<=last;d++) out.push(`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`);
   return out;
 };
+
+// ── Leave balances (counted in DAYS, not applications) ──────────────
+// Leave year runs April–March. Weekly offs and holidays inside a leave are not charged.
+// Half day is a duration (0.5), available on every leave type.
+const LEAVE_TYPES=[["casual","Casual"],["sick","Sick"],["studyleave","Study"],["compoff","Comp Off"]];
+const LEAVE_LABEL={casual:"Casual",sick:"Sick",studyleave:"Study",compoff:"Comp Off",halfday:"Half Day (old)",early:"Early (old)"};
+const LEAVE_YEAR_START=4;
+const leaveYear=ds=>{
+  const [y,m]=ds.split("-").map(Number), sy=m>=LEAVE_YEAR_START?y:y-1, mm=String(LEAVE_YEAR_START).padStart(2,"0");
+  return [`${sy}-${mm}-01`,`${sy+1}-${mm}-01`];
+};
+const leaveDays=(l,D,user,lo,hi)=>{
+  if(l.type==="early")return 0;
+  const hols=holsFor(D,user), wo=user?.weeklyOff||"sun_sat";
+  const half=l.duration==="half"||l.type==="halfday";
+  const end=half?l.from:(l.to||l.from);
+  let n=0,d=l.from;
+  while(d<=end){ if((!lo||d>=lo)&&(!hi||d<hi)&&!isDayOff(d,hols,wo))n+=half?0.5:1; d=addDays(d,1); }
+  return n;
+};
+// Whole months served since a date (the month is earned once it is completed)
+const monthsServed=(start,today)=>{
+  if(!start)return 0;
+  const [sy,sm,sd]=start.split("-").map(Number),[ty,tm,td]=today.split("-").map(Number);
+  return Math.max(0,(ty-sy)*12+(tm-sm)-(td<sd?1:0));
+};
+const leaveBalances=(D,user)=>{
+  const isAA=user?.employeeType==="articled";
+  const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
+  const [ys,ye]=leaveYear(tod());
+  const out=[];
+  LEAVE_TYPES.forEach(([t,label])=>{
+    if(t==="compoff"){ out.push({type:t,label,total:null,left:compOffLedger(D,user).available}); return; }
+    if(isAA){
+      // Articled: earned per completed month of articleship, never resets
+      if(!["sick","studyleave"].includes(t))return;
+      const rate=Number(pol[t+"PerMonth"]??(isAA?DP_AA:DP_EMP)[t+"PerMonth"])||0; if(rate<=0)return;
+      const start=user.articleshipStart||null;
+      const months=monthsServed(start,tod());
+      const total=Math.round(months*rate*10)/10;
+      const used=(D.leaves||[])
+        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&l.type===t&&(!start||(l.to||l.from)>=start))
+        .reduce((s,l)=>s+leaveDays(l,D,user,start||undefined),0);
+      out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),
+        accrual:{rate,months,start}});
+      return;
+    }
+    const total=Number(pol[t])||0; if(total<=0)return;
+    const used=(D.leaves||[])
+      .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&(l.type===t||(t==="casual"&&l.type==="halfday")))
+      .reduce((s,l)=>s+leaveDays(l,D,user,ys,ye),0);
+    out.push({type:t,label,total,used,left:Math.max(0,total-used)});
+  });
+  return out;
+};
 // Payable working days: excludes this person's weekly offs and their calendar's holidays
 const workingDaysFor=(y,m,hols,weeklyOff)=>
   daysOfMonth(y,m).filter(ds=>!isDayOff(ds,hols,weeklyOff)).length;
@@ -305,8 +360,8 @@ const upcomingOffs=(D,user,days=60)=>{
 const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}catch{return f;}};
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
-const DP_EMP={casual:12,sick:12,compoff:6,halfday:24,early:12};
-const DP_AA={sick:12,casual:0,compoff:0,halfday:0,early:0,studyleave:12};
+const DP_EMP={casual:12,sick:12};
+const DP_AA={sickPerMonth:1,studyleavePerMonth:1};
 const DP={employee:DP_EMP,articled:DP_AA};
 const GRACE_MINS=15;
 // SaaS features (trial countdown, plan limits, upgrade prompts).
@@ -364,7 +419,7 @@ const L={fontSize:11,color:G.mut,marginBottom:4,display:"block",fontWeight:700,l
 const K={background:G.card,border:`1px solid ${G.bdr}`,borderRadius:16,padding:18,marginBottom:12,boxShadow:"0 1px 3px rgba(27,42,94,0.06)"};
 
 const Chip=({bg,label,sm})=>(
-  <span style={{background:bg,color:inkOn(bg),border:isLightBg(bg)?`1px solid ${G.bdr}`:"none",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
+  <span style={{alignSelf:"flex-start",flexShrink:0,whiteSpace:"nowrap",background:bg,color:inkOn(bg),border:isLightBg(bg)?`1px solid ${G.bdr}`:"none",fontSize:sm?10:11,fontWeight:700,padding:sm?"2px 7px":"3px 10px",borderRadius:20}}>{label}</span>
 );
 const FRow=({label,children})=>(
   <div style={{marginBottom:12}}><label style={L}>{label}</label>{children}</div>
@@ -914,68 +969,91 @@ function LECard({D,user,ST,AN}) {
 }
 
 function WorkReq({user,D,ST,AN,setSc}) {
-  const [sel,setSel]=useState(null);
+  const [picked,setPicked]=useState([]);        // dates selected for a request
   const [why,setWhy]=useState("");
+  const [busy,setBusy]=useState(false);
   const mine=(D.workApprovals||[]).filter(w=>w.userId===user.id);
-  const offs=upcomingOffs(D,user,60);
+  const reqFor=ds=>mine.find(w=>w.date===ds&&w.status!=="cancelled"&&w.status!=="rejected");
+  const offs=upcomingOffs(D,user,30);
+  const free=offs.filter(o=>!reqFor(o.date));             // days that can still be requested
   const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
   const L=compOffLedger(D,user);
+  const toggle=ds=>setPicked(p=>p.includes(ds)?p.filter(x=>x!==ds):[...p,ds]);
+  const allOn=free.length>0&&free.every(o=>picked.includes(o.date));
   const submit=async()=>{
+    if(!picked.length)return ST("Select at least one day","error");
     if(!why.trim())return ST("Please give a reason","error");
     if(!mgr)return ST("No reporting manager set — ask admin to set one","error");
-    if(mine.some(w=>w.date===sel.date&&w.status!=="cancelled"&&w.status!=="rejected"))return ST("Already requested for this date","error");
-    await addWorkApproval({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,managerId:mgr.id,
-      date:sel.date,dayName:sel.name,reason:why.trim(),appliedOn:new Date().toISOString(),status:"pending"});
-    AN(mgr.id,`${user.name} wants to work on ${fD(sel.date)} (${sel.name}). Reason: ${why.trim()}`,"info");
-    ST("Request sent to "+mgr.name);setSel(null);setWhy("");
+    setBusy(true);
+    const days=offs.filter(o=>picked.includes(o.date)&&!reqFor(o.date));
+    const now=new Date().toISOString();
+    for(const o of days){
+      await addWorkApproval({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,managerId:mgr.id,
+        date:o.date,dayName:o.name,reason:why.trim(),appliedOn:now,status:"pending"});
+    }
+    AN(mgr.id,`${user.name} wants to work on ${days.length} day${days.length>1?"s":""} off: ${days.map(o=>fD(o.date)).join(", ")}. Reason: ${why.trim()}`,"info");
+    ST(`${days.length} request${days.length>1?"s":""} sent to ${mgr.name}`);
+    setPicked([]);setWhy("");setBusy(false);
   };
-  const withdraw=async w=>{if(!confirm("Withdraw this request?"))return;await updateWorkApproval(w.id,{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});ST("Withdrawn");};
+  const withdraw=async w=>{if(!confirm(`Withdraw request for ${fD(w.date)}?`))return;await updateWorkApproval(w.id,{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});ST("Withdrawn");};
   const stCol={pending:G.am,approved:G.gr,rejected:G.rd,cancelled:G.dim};
   return (
-    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+    <div style={{maxWidth:440,margin:"0 auto",padding:"20px 20px 110px"}}>
       <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14}}>
         <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
         <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Work on holiday / weekly off</h2>
       </div>
       <div style={{...K,background:G.card2}}>
         <div style={{fontSize:12,color:G.mut}}>
-          Get approval first, then check in and check out that day (WFH is fine). ≥75% of your shift earns 1 comp off, ≥40% earns half. Comp off expires 90 days after it is earned.
+          Select the days you need to work and send them for approval together. On an approved day, check in and check out (WFH is fine). ≥75% of your shift earns 1 comp off, ≥40% earns half. Comp off expires 90 days after it is earned.
         </div>
         <div style={{display:"flex",gap:8,marginTop:10}}>
           <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:20,fontWeight:900,color:G.gr}}>{L.available}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>AVAILABLE</div></div>
           <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:20,fontWeight:900,color:G.am}}>{L.expiringSoon}</div><div style={{fontSize:10,color:G.dim,fontWeight:700}}>EXPIRING ≤15 DAYS</div></div>
         </div>
       </div>
-      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"4px 0 8px"}}>Your upcoming days off</div>
-      {offs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20}}>No days off in the next 60 days.</div>}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"4px 0 8px"}}>
+        <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase"}}>Weekly offs & holidays · next 30 days</div>
+        {free.length>0&&(
+          <button onClick={()=>setPicked(allOn?[]:free.map(o=>o.date))}
+            style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:11,padding:"5px 10px"}}>{allOn?"Clear all":"Select all"}</button>
+        )}
+      </div>
+      {offs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20}}>No days off in the next 30 days.</div>}
       {offs.map(o=>{
-        const req=mine.find(w=>w.date===o.date&&w.status!=="cancelled");
+        const req=reqFor(o.date), on=picked.includes(o.date), isHol=o.name!=="Weekly off";
         return (
-          <div key={o.date} style={{...K,padding:12,border:`1px solid ${sel?.date===o.date?G.gold:G.bdr}`}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div><div style={{fontWeight:700,fontSize:13}}>{fD(o.date)} · {new Date(o.date+"T12:00:00").toLocaleDateString([],{weekday:"short"})}</div><div style={{fontSize:12,color:G.mut}}>{o.name}</div></div>
-              {req
-                ?<div style={{display:"flex",gap:6,alignItems:"center"}}><Chip bg={stCol[req.status]||G.dim} label={req.status} sm/>{req.status==="pending"&&<button onClick={()=>withdraw(req)} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:11,padding:"4px 8px"}}>Withdraw</button>}</div>
-                :<button onClick={()=>{setSel(sel?.date===o.date?null:o);setWhy("");}} style={{...B(sel?.date===o.date?G.gold:G.card2),border:sel?.date===o.date?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"6px 12px"}}>{sel?.date===o.date?"Selected":"Request"}</button>}
-            </div>
-            {sel?.date===o.date&&(
-              <div style={{marginTop:10}}>
-                <textarea style={{...I,minHeight:60,resize:"vertical"}} value={why} onChange={e=>setWhy(e.target.value)} placeholder="Why do you need to work this day?"/>
-                <button onClick={submit} style={{...B(G.gold),width:"100%",marginTop:8,fontWeight:800}}>Send to {mgr?.name||"manager"}</button>
+          <div key={o.date} onClick={()=>!req&&toggle(o.date)}
+            style={{...K,padding:12,marginBottom:8,cursor:req?"default":"pointer",border:`1px solid ${on?G.gold:G.bdr}`,background:on?"#fdf1f1":G.card}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              {!req&&(
+                <div style={{width:22,height:22,borderRadius:6,flexShrink:0,border:`2px solid ${on?G.gold:G.bdr}`,background:on?G.gold:"#fff",color:"#fff",fontSize:14,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center"}}>{on?"✓":""}</div>
+              )}
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13}}>{fD(o.date)} · {new Date(o.date+"T12:00:00").toLocaleDateString([],{weekday:"short"})}</div>
+                <div style={{fontSize:12,color:isHol?G.gold:G.mut,fontWeight:isHol?700:400}}>{isHol?`🎉 ${o.name}`:"Weekly off"}</div>
               </div>
-            )}
+              {req&&(
+                <div style={{display:"flex",gap:6,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
+                  <Chip bg={stCol[req.status]||G.dim} label={req.status} sm/>
+                  {req.status==="pending"&&<button onClick={()=>withdraw(req)} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:11,padding:"4px 8px"}}>Withdraw</button>}
+                </div>
+              )}
+            </div>
           </div>
         );
       })}
+
       {L.credits.length>0&&(
         <>
-          <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"12px 0 8px"}}>Your comp off credits</div>
+          <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"14px 0 8px"}}>Your comp off credits</div>
           {L.credits.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(x=>(
             <div key={x.id} style={{...K,padding:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
                 <div style={{fontWeight:700,fontSize:13}}>{x.kind==="opening"?"Opening balance":`Worked ${fD(x.date)}`}</div>
                 <div style={{fontSize:12,color:G.mut}}>
-                  {x.kind==="work"&&(x.open?"Still checked in — credit counted after check-out · ":`${Math.floor(x.mins/60)}h ${x.mins%60}m worked · `)}
+                  {x.kind==="work"&&(x.open?"Still checked in — counted after check-out · ":`${Math.floor(x.mins/60)}h ${x.mins%60}m worked · `)}
                   expires {fD(x.expires)}
                 </div>
               </div>
@@ -987,10 +1065,19 @@ function WorkReq({user,D,ST,AN,setSc}) {
           ))}
         </>
       )}
+
+      {picked.length>0&&(
+        <div style={{position:"fixed",left:0,right:0,bottom:0,background:G.card,borderTop:`1px solid ${G.bdr}`,boxShadow:"0 -4px 16px rgba(27,42,94,.12)",padding:"12px 16px",zIndex:50}}>
+          <div style={{maxWidth:440,margin:"0 auto"}}>
+            <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>{picked.length} day{picked.length>1?"s":""} selected</div>
+            <textarea style={{...I,minHeight:48,resize:"vertical",marginBottom:8}} value={why} onChange={e=>setWhy(e.target.value)} placeholder="Reason (applies to all selected days)"/>
+            <button disabled={busy} onClick={submit} style={{...B(G.gold),width:"100%",fontWeight:800}}>{busy?"Sending…":`Send ${picked.length} request${picked.length>1?"s":""} to ${mgr?.name||"manager"}`}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
 function Hist({user,D,setSc}) {
   const now=new Date();
   const [yr,setYr]=useState(now.getFullYear());
@@ -1095,86 +1182,112 @@ function Hist({user,D,setSc}) {
   );
 }
 
-function Lv({user,D,P,ST,setSc}) {
-  const [form,setForm]=useState({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:"",duration:"full"});
-  const polBase=(D.leavePolicy||DP)[(user.employeeType||'employee')]||DP_EMP;
+function Lv({user,D,ST,setSc}) {
+  const bal=leaveBalances(D,user);
+  const avail=bal.filter(b=>b.left>0);                 // only leave types with balance can be applied
+  const blank=()=>({type:avail[0]?.type||"",duration:"full",from:tod(),to:tod(),reason:""});
+  const [form,setForm]=useState(blank);
+  const cur=bal.find(b=>b.type===form.type);
   const CO=compOffLedger(D,user);
-  // comp off is earned, not an annual quota — always offered, balance from the ledger
-  const pol={...polBase,compoff:CO.available};
-  const used=t=>t==="compoff"?0:(D.leaves||[]).filter(l=>l.userId===user.id&&l.type===t&&l.status==="approved").length;
-  const tL={casual:"🏖 Casual",sick:"🤒 Sick",compoff:"🔄 CompOff",halfday:"🌓 Half Day",early:"🏃 Early"};
-  const sc={pending:G.am,approved:G.gr,rejected:G.rd};
-  const apply=()=>{
-    if(!form.reason.trim())return ST("Please add a reason","error");
-    if(user.employeeType==="articled"&&!["sick","studyleave","compoff"].includes(form.type))
-      return ST("Articled Assistants can only apply Sick, Study or Comp Off (ICAI rules)","error");
+  const draft={...form,to:form.duration==="half"?form.from:form.to};
+  const need=form.type?leaveDays(draft,D,user):0;
+  const sc={pending:G.am,approved:G.gr,rejected:G.rd,cancelled:G.dim};
+
+  const apply=async()=>{
+    if(!form.type)return ST("No leave balance available","error");
+    if(form.duration!=="half"&&form.to<form.from)return ST("'To' date is before 'From' date","error");
+    if(need<=0)return ST("Those dates are all weekly offs or holidays — nothing to apply","error");
     if(form.type==="compoff"){
-      const need=coNeed({...form,to:form.duration==="half"?form.from:form.to},holsFor(D,user),user.weeklyOff||"sun_sat");
-      if(need<=0)return ST("Those dates are all days off — nothing to apply","error");
-      const avail=CO.availableOn(form.from);
-      if(need>avail)return ST(`Need ${need} comp off, only ${avail} valid on ${fD(form.from)}`,"error");
-      addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,
-        to:form.duration==="half"?form.from:form.to,days:need,appliedOn:new Date().toISOString(),status:"pending"});
-    } else {
-    if((pol[form.type]||0)-used(form.type)<=0)return ST("No leaves remaining","error");
-    addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,...form,appliedOn:new Date().toISOString(),status:"pending"});
-    }
-    const mgr2=(D.users||[]).find(u=>u.id===user.reportingTo);
-    if(mgr2)notifyLeaveReq(mgr2, user.name, form.type, form.from);
-    ST("✅ Leave applied! Manager notified.");setForm({type:"casual",from:tod(),to:tod(),reason:"",session:"morning",earlyTime:""});
+      const ok=CO.availableOn(form.from);
+      if(need>ok)return ST(`Need ${need} comp off, only ${ok} valid on ${fD(form.from)}`,"error");
+    } else if(need>(cur?.left||0)) return ST(`Need ${need} day(s), only ${cur?.left||0} ${cur?.label} left`,"error");
+    if(!form.reason.trim())return ST("Please add a reason","error");
+    await addLeave({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
+      ...draft,days:need,appliedOn:new Date().toISOString(),status:"pending"});
+    const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
+    if(mgr)notifyLeaveReq(mgr,user.name,LEAVE_LABEL[form.type]||form.type,form.from);
+    ST("✅ Leave applied — manager notified");setForm(blank());
   };
+
   const myL=(D.leaves||[]).filter(l=>l.userId===user.id).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
+  const tog=(on)=>({...B(on?G.gold:G.card2),flex:1,fontSize:13,border:on?"none":`1px solid ${G.bdr}`});
+
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
       <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14}}>
         <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
-        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Leave Management</h2>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Leaves</h2>
       </div>
+
       <div style={K}>
-        <div style={{fontSize:11,color:G.mut,fontWeight:700,textTransform:"uppercase",marginBottom:10}}>Balance</div>
+        <div style={{fontSize:11,color:G.mut,fontWeight:700,textTransform:"uppercase",marginBottom:10}}>
+          {user.employeeType==="articled"?"Balance · earned monthly over articleship":"Balance · leave year April – March"}
+        </div>
+        {user.employeeType==="articled"&&!user.articleshipStart&&(
+          <div style={{fontSize:12,color:G.am,marginBottom:8}}>Articleship start date is not set, so no leave has been earned yet. Ask HR to add it.</div>
+        )}
         <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-          {Object.entries(pol).map(([t,a])=>{const r=a-used(t);return(
-            <div key={t} style={{background:G.card2,borderRadius:10,padding:"8px 10px",flex:"1 1 60px",textAlign:"center",border:`1px solid ${r>0?G.bdr:G.rd+"44"}`}}>
-              <div style={{fontSize:9,color:G.dim,textTransform:"uppercase",fontWeight:700}}>{t}</div>
-              <div style={{fontSize:19,fontWeight:900,color:r>0?G.gold:G.rd}}>{r}</div>
-              <div style={{fontSize:9,color:G.dim}}>/{a}</div>
+          {bal.map(b=>(
+            <div key={b.type} style={{background:G.card2,borderRadius:10,padding:"8px 10px",flex:"1 1 70px",textAlign:"center",border:`1px solid ${b.left>0?G.bdr:G.rd+"55"}`,opacity:b.left>0?1:.6}}>
+              <div style={{fontSize:10,color:G.mut,textTransform:"uppercase",fontWeight:700}}>{b.label}</div>
+              <div style={{fontSize:20,fontWeight:900,color:b.left>0?G.txt:G.rd}}>{b.left}</div>
+              <div style={{fontSize:10,color:G.dim}}>{b.total===null?"earned":`of ${b.total}`}</div>
+              {b.accrual&&<div style={{fontSize:9,color:G.dim,marginTop:2}}>{b.accrual.rate}/month × {b.accrual.months} mo</div>}
             </div>
-          );})}
+          ))}
         </div>
       </div>
+
       <div style={K}>
-        <div style={{fontWeight:800,marginBottom:10,color:G.gold}}>Apply for Leave</div>
-        <FRow label="Type"><select style={I} value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{Object.keys(pol).map(t=><option key={t} value={t}>{tL[t]||t} ({pol[t]-used(t)} left)</option>)}</select></FRow>
-        {form.type==="halfday"&&(
-          <FRow label="Half Day Session">
+        <div style={{fontWeight:800,marginBottom:10}}>Apply for leave</div>
+        {avail.length===0?(
+          <div style={{fontSize:13,color:G.mut,padding:"8px 0"}}>You have no leave balance left. Speak to HR if you need time off.</div>
+        ):(<>
+          <FRow label="Leave type">
+            <select style={I} value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+              {avail.map(b=><option key={b.type} value={b.type}>{b.label} — {b.left} left</option>)}
+            </select>
+          </FRow>
+          <FRow label="Duration">
             <div style={{display:"flex",gap:8}}>
-              <button type="button" onClick={()=>setForm({...form,session:"morning"})} style={{...B(form.session==="morning"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="morning"?"#fff":G.mut,border:form.session==="morning"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌅 Morning</button>
-              <button type="button" onClick={()=>setForm({...form,session:"afternoon"})} style={{...B(form.session==="afternoon"?G.gold:G.card2),flex:1,fontSize:13,color:form.session==="afternoon"?"#fff":G.mut,border:form.session==="afternoon"?"none":`1px solid ${G.bdr}`,padding:"10px"}}>🌇 Afternoon</button>
+              <button type="button" onClick={()=>setForm({...form,duration:"full"})} style={tog(form.duration==="full")}>Full day(s)</button>
+              <button type="button" onClick={()=>setForm({...form,duration:"half",to:form.from})} style={tog(form.duration==="half")}>Half day</button>
             </div>
           </FRow>
-        )}
-        {form.type==="compoff"&&(
-          <FRow label={`Comp off · ${CO.available} available${CO.expiringSoon?` · ${CO.expiringSoon} expiring within 15 days`:""}`}>
+          {form.duration==="half"?(
+            <>
+              <FRow label="Date"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value,to:e.target.value})}/></FRow>
+              <FRow label="Session">
+                <div style={{display:"flex",gap:8}}>
+                  <button type="button" onClick={()=>setForm({...form,session:"morning"})} style={tog((form.session||"morning")==="morning")}>Morning</button>
+                  <button type="button" onClick={()=>setForm({...form,session:"afternoon"})} style={tog(form.session==="afternoon")}>Afternoon</button>
+                </div>
+              </FRow>
+            </>
+          ):(
             <div style={{display:"flex",gap:8}}>
-              {[["full","Full day(s)"],["half","Half day"]].map(([v,lb])=>(
-                <button key={v} type="button" onClick={()=>setForm({...form,duration:v,to:v==="half"?form.from:form.to})}
-                  style={{...B(form.duration===v?G.gold:G.card2),flex:1,fontSize:13,border:form.duration===v?"none":`1px solid ${G.bdr}`}}>{lb}</button>
-              ))}
+              <FRow label="From"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value,to:e.target.value<form.to?form.to:e.target.value})}/></FRow>
+              <FRow label="To"><input type="date" style={I} value={form.to} onChange={e=>setForm({...form,to:e.target.value})}/></FRow>
             </div>
-          </FRow>
-        )}
-        {form.type==="early"&&<FRow label="Early Time"><input type="time" style={I} value={form.earlyTime} onChange={e=>setForm({...form,earlyTime:e.target.value})}/></FRow>}
-        {(form.type==="halfday"||form.type==="early"||(form.type==="compoff"&&form.duration==="half"))
-          ?<FRow label="Date"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value,to:e.target.value})}/></FRow>
-          :<div style={{display:"flex",gap:8}}><FRow label="From"><input type="date" style={I} value={form.from} onChange={e=>setForm({...form,from:e.target.value})}/></FRow><FRow label="To"><input type="date" style={I} value={form.to} onChange={e=>setForm({...form,to:e.target.value})}/></FRow></div>
-        }
-        <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:65}} value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})} placeholder="Reason…"/></FRow>
-        <button onClick={apply} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Apply Leave</button>
+          )}
+          <div style={{fontSize:12,color:need>0?G.mut:G.am,marginBottom:10}}>
+            {need>0?`This uses ${need} day${need===1?"":"s"} of ${cur?.label}. Weekly offs and holidays are not counted.`:"Selected dates are weekly offs or holidays."}
+          </div>
+          <FRow label="Reason"><textarea style={{...I,resize:"vertical",minHeight:65}} value={form.reason} onChange={e=>setForm({...form,reason:e.target.value})} placeholder="Reason…"/></FRow>
+          <button onClick={apply} style={{...B(G.gold),width:"100%",fontWeight:800}}>Apply leave</button>
+        </>)}
       </div>
+
+      {myL.length>0&&<div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"4px 0 8px"}}>Your applications</div>}
       {myL.map(l=>(
         <div key={l.id} style={K}>
-          <div style={{display:"flex",justifyContent:"space-between"}}>
-            <div><div style={{fontWeight:700}}>{tL[l.type]||l.type}</div><div style={{fontSize:12,color:G.mut,marginTop:2}}>{l.from}{l.to&&l.to!==l.from?`→${l.to}`:""}</div><div style={{fontSize:12,color:G.dim,fontStyle:"italic"}}>"{l.reason}"</div>{l.reviewNote&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>Note: {l.reviewNote}</div>}</div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+            <div>
+              <div style={{fontWeight:700}}>{LEAVE_LABEL[l.type]||l.type}{(l.duration==="half"||l.type==="halfday")&&" · half day"}</div>
+              <div style={{fontSize:12,color:G.mut,marginTop:2}}>{fD(l.from)}{l.to&&l.to!==l.from?` → ${fD(l.to)}`:""} · {leaveDays(l,D,user)} day{leaveDays(l,D,user)===1?"":"s"}</div>
+              {l.reason&&<div style={{fontSize:12,color:G.dim,fontStyle:"italic"}}>"{l.reason}"</div>}
+              {l.reviewNote&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>Note: {l.reviewNote}</div>}
+            </div>
             <Chip bg={sc[l.status]||G.dim} label={l.status} sm/>
           </div>
         </div>
@@ -1182,7 +1295,6 @@ function Lv({user,D,P,ST,setSc}) {
     </div>
   );
 }
-
 function Notif({user,D,P,setSc}) {
   const ns=(D.notifications||[]).filter(n=>n.userId===user.id).sort((a,b)=>new Date(b.ts)-new Date(a.ts));
   const markAll=()=>(D.notifications||[]).filter(n=>n.userId===user.id&&!n.read).forEach(n=>updateNotification(n.id,{read:true}));
@@ -1607,7 +1719,7 @@ function LT({D,vu,P,ST,AN,isA}) {
             {ed?(
               <div>
                 <div style={{color:G.gold,fontWeight:800,marginBottom:10}}>✏️ Edit: {l.userName}</div>
-                <FRow label="Type"><select style={I} value={ef.type} onChange={e=>setEf({...ef,type:e.target.value})}>{Object.keys(D.leavePolicy||DP).map(t=><option key={t} value={t}>{t}</option>)}</select></FRow>
+                <FRow label="Type"><select style={I} value={ef.type} onChange={e=>setEf({...ef,type:e.target.value})}>{LEAVE_TYPES.map(([t,lb])=><option key={t} value={t}>{lb}</option>)}</select></FRow>
                 <FRow label="Status"><select style={I} value={ef.status} onChange={e=>setEf({...ef,status:e.target.value})}><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select></FRow>
                 <div style={{display:"flex",gap:8}}><FRow label="From"><input type="date" style={I} value={ef.from} onChange={e=>setEf({...ef,from:e.target.value})}/></FRow><FRow label="To"><input type="date" style={I} value={ef.to} onChange={e=>setEf({...ef,to:e.target.value})}/></FRow></div>
                 <FRow label="Note"><input style={I} value={ef.note||""} onChange={e=>setEf({...ef,note:e.target.value})} placeholder="Note to staff…"/></FRow>
@@ -1990,14 +2102,28 @@ function PT({D,vu,ST,user}) {
     const offDays=daysOfMonth(yr,mo).length-wd;
     const pol=(polAll[u.employeeType||"employee"]||DP_EMP);
     const ar=D.attendance.filter(a=>a.userId===u.id&&a.date>=s&&a.date<=e);
-    const ap=(D.leaves||[]).filter(l=>l.userId===u.id&&l.status==="approved"&&l.from>=s&&l.from<=e);
-    const pr=ar.filter(r=>r.status==="present").length,lt=ar.filter(r=>r.status==="late").length,wf=ar.filter(r=>r.isWFH).length;
-    const hd=ap.filter(l=>l.type==="halfday").length,cl=ap.filter(l=>l.type==="casual").length,sl=ap.filter(l=>l.type==="sick").length,co=ap.filter(l=>l.type==="compoff").length;
-    const tm=ar.reduce((s,r)=>s+wMin(r.checkIn,r.checkOut),0),am=ar.length?Math.round(tm/ar.length):0;
-    const tp=pr+lt+wf,pd=Math.round((tp+(hd*.5)+cl+sl+co)*10)/10,ab=Math.max(0,wd-Math.round(pd));
+    // One attended day per date (re-check-ins don't double count); days off are not paid twice
+    const byDate={};
+    ar.forEach(r=>{ if(isDayOff(r.date,uHols,uWO))return; const p=byDate[r.date]; if(!p||r.status==="present"||(r.status==="late"&&p.status==="wfh"))byDate[r.date]=r; });
+    const days=Object.values(byDate);
+    const pr=days.filter(r=>r.status==="present").length,lt=days.filter(r=>r.status==="late").length,wf=days.filter(r=>r.isWFH||r.status==="wfh").length;
+    // Approved leave counted in days that fall inside this month
+    const eNext=addDays(e,1);
+    const ap=(D.leaves||[]).filter(l=>l.userId===u.id&&l.status==="approved"&&l.from<eNext&&(l.to||l.from)>=s);
+    const dIn=l=>leaveDays(l,D,u,s,eNext);
+    const leaveOn=new Set(); // dates already paid as leave, so attendance on them isn't added again
+    ap.forEach(l=>{let d=l.from;const end=(l.duration==="half"||l.type==="halfday")?l.from:(l.to||l.from);while(d<=end){leaveOn.add(d);d=addDays(d,1);}});
+    const hd=ap.filter(l=>l.duration==="half"||l.type==="halfday").length;
+    const cl=ap.filter(l=>l.type==="casual"||l.type==="halfday").reduce((x,l)=>x+dIn(l),0);
+    const sl=ap.filter(l=>l.type==="sick").reduce((x,l)=>x+dIn(l),0);
+    const st=ap.filter(l=>l.type==="studyleave").reduce((x,l)=>x+dIn(l),0);
+    const co=ap.filter(l=>l.type==="compoff").reduce((x,l)=>x+dIn(l),0);
+    const tm=ar.reduce((x,r)=>x+wMin(r.checkIn,r.checkOut),0),am=days.length?Math.round(tm/days.length):0;
+    const tp=days.filter(r=>!leaveOn.has(r.date)).length;
+    const pd=Math.min(wd,Math.round((tp+cl+sl+st+co)*10)/10),ab=Math.max(0,Math.round((wd-pd)*10)/10);
     const team=D.teams.find(t=>t.id===u.teamId);
     const cal=calsOf(D).find(x=>x.id===calIdOf(u));
-    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,pr,lt,wf,hd,cl,sl,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
+    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,pr,lt,wf,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
   const exp=()=>{
     const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
@@ -2036,12 +2162,14 @@ function PT({D,vu,ST,user}) {
 
 function PC({D,P,ST}) {
   const fullPol=D.leavePolicy||DP;
-  const [polEmp,setPolEmp]=useState({...fullPol.employee||DP_EMP});
-  const [polAA,setPolAA]=useState({...fullPol.articled||DP_AA});
+  const [polEmp,setPolEmp]=useState({...DP_EMP,...(fullPol.employee||{})});
+  const [polAA,setPolAA]=useState({...DP_AA,...(fullPol.articled||{})});
   const [etab,setEtab]=useState("employee");
   const pol=etab==="employee"?polEmp:polAA;
   const setPol=etab==="employee"?setPolEmp:setPolAA;
-  const tl={casual:"Casual Leave",sick:"Sick Leave",compoff:"Comp Off",halfday:"Half Day",early:"Early Leaving"};
+  const tl=etab==="articled"?{sickPerMonth:"Sick Leave",studyleavePerMonth:"Study Leave"}:{casual:"Casual Leave",sick:"Sick Leave"};
+  const unit=etab==="articled"?"per month served":"per year (April – March)";
+  const stp=etab==="articled"?0.5:1;
   const save=()=>{P({...D,leavePolicy:{employee:polEmp,articled:polAA}});ST("✅ Policy saved!");};
   const reset=()=>{setPolEmp({...DP_EMP});setPolAA({...DP_AA});P({...D,leavePolicy:DP});ST("Reset!");};
   return (
@@ -2052,15 +2180,15 @@ function PC({D,P,ST}) {
         <button onClick={()=>setEtab("articled")} style={{...B(etab==="articled"?G.gold:G.card),flex:1,fontSize:13,color:etab==="articled"?"#fff":G.mut,border:etab==="articled"?"none":`1px solid ${G.bdr}`,fontWeight:700}}>Articled Assistant</button>
       </div>
       <div style={K}>
-        <div style={{fontWeight:800,marginBottom:4,color:G.gold,fontSize:14}}>{etab==="employee"?"Employee":"Articled Assistant"} — Annual Allowances</div>
-        <div style={{fontSize:11,color:G.dim,marginBottom:12}}>Leaves per year for {etab==="employee"?"regular employees":"articled assistants (CA trainees)"}</div>
+        <div style={{fontWeight:800,marginBottom:4,color:G.gold,fontSize:14}}>{etab==="employee"?"Employee":"Articled Assistant"} — {etab==="articled"?"Monthly Accrual":"Annual Allowances"}</div>
+        <div style={{fontSize:11,color:G.dim,marginBottom:12}}>{etab==="employee"?"Days per leave year (April – March). Resets every 1 April.":"Days earned for each completed month of articleship. Builds up over the whole tenure and never resets."}</div>
         {Object.entries(tl).map(([t,lb])=>(
           <div key={t} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${G.bdr}`}}>
-            <div><div style={{fontWeight:700,fontSize:13}}>{lb}</div><div style={{fontSize:11,color:G.dim}}>{pol[t]} days per year</div></div>
+            <div><div style={{fontWeight:700,fontSize:13}}>{lb}</div><div style={{fontSize:11,color:G.dim}}>{pol[t]||0} days {unit}</div></div>
             <div style={{display:"flex",gap:6,alignItems:"center"}}>
-              <button onClick={()=>setPol({...pol,[t]:Math.max(0,pol[t]-1)})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>−</button>
-              <input type="number" value={pol[t]} onChange={e=>setPol({...pol,[t]:Math.max(0,parseInt(e.target.value)||0)})} style={{...I,width:58,textAlign:"center",padding:"7px 5px"}}/>
-              <button onClick={()=>setPol({...pol,[t]:pol[t]+1})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>+</button>
+              <button onClick={()=>setPol({...pol,[t]:Math.max(0,(pol[t]||0)-stp)})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>−</button>
+              <input type="number" value={pol[t]||0} step={stp} onChange={e=>setPol({...pol,[t]:Math.max(0,parseFloat(e.target.value)||0)})} style={{...I,width:58,textAlign:"center",padding:"7px 5px"}}/>
+              <button onClick={()=>setPol({...pol,[t]:(pol[t]||0)+stp})} style={{...B(G.card2),padding:"4px 10px",fontSize:15,border:`1px solid ${G.bdr}`}}>+</button>
             </div>
           </div>
         ))}
@@ -2072,8 +2200,7 @@ function PC({D,P,ST}) {
       <div style={K}>
         <div style={{fontWeight:700,marginBottom:8,color:G.gold}}>Staff Usage Summary</div>
         {D.users.filter(u=>u.role!=="admin").map(u=>{
-          const uPol=(D.leavePolicy||DP)[(u.employeeType||"employee")]||DP_EMP;
-          const ub=Object.keys(uPol).reduce((a,t)=>{a[t]=(D.leaves||[]).filter(l=>l.userId===u.id&&l.type===t&&l.status==="approved").length;return a;},{});
+          const bs=leaveBalances(D,u).filter(b=>b.type!=="compoff");
           return(
             <div key={u.id} style={{padding:"8px 0",borderBottom:`1px solid ${G.bdr}`}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
@@ -2081,7 +2208,7 @@ function PC({D,P,ST}) {
                 <Chip bg={u.employeeType==="articled"?G.pu:G.bl} label={u.employeeType==="articled"?"Articled":"Employee"} sm/>
               </div>
               <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                {Object.entries(uPol).map(([t,mx])=>{const us=ub[t];return(<div key={t} style={{background:G.card2,borderRadius:6,padding:"2px 7px",fontSize:10,border:`1px solid ${us>=mx&&mx>0?G.rd+"44":G.bdr}`}}><span style={{color:G.dim}}>{t}:</span><span style={{color:us>=mx&&mx>0?G.rd:G.gold,fontWeight:700}}>{us}/{mx}</span></div>);})}
+                {bs.map(b=>(<div key={b.type} style={{background:G.card2,borderRadius:6,padding:"2px 7px",fontSize:11,border:`1px solid ${b.left<=0?G.rd+"55":G.bdr}`}}><span style={{color:G.mut}}>{b.label}: </span><span style={{color:b.left<=0?G.rd:G.txt,fontWeight:700}}>{b.used}/{b.total} used</span></div>))}
               </div>
             </div>
           );
