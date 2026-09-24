@@ -284,6 +284,17 @@ const shiftFor=(D,user)=>{
   const t=(D.teams||[]).find(x=>x.id===user?.teamId);
   return t?{shiftStart:t.shiftStart,shiftEnd:t.shiftEnd}:null;
 };
+// Location for check-out: a recent cached fix is fine, and we never wait forever.
+// Returns null if the phone can't answer in time — check-out still goes through.
+const quickPos=(ms=6000)=>new Promise(res=>{
+  if(!navigator.geolocation)return res(null);
+  let done=false; const fin=v=>{if(!done){done=true;res(v);}};
+  const t=setTimeout(()=>fin(null),ms);
+  navigator.geolocation.getCurrentPosition(
+    p=>{clearTimeout(t);fin({lat:p.coords.latitude,lng:p.coords.longitude,ac:Math.round(p.coords.accuracy)});},
+    ()=>{clearTimeout(t);fin(null);},
+    {enableHighAccuracy:false,timeout:ms,maximumAge:120000});
+});
 const minsBeforeEnd=(co,se)=>{const [h,m]=se.split(":").map(Number),e=new Date(co);e.setHours(h,m,0,0);return Math.max(0,Math.round((e-new Date(co))/60000));};
 
 // Every late / early incident for one person in a month, oldest first.
@@ -399,6 +410,8 @@ const GRACE_MINS=15;
 // SaaS features (trial countdown, plan limits, upgrade prompts).
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
+// Shown on the login screen so you can tell which build a phone is actually running
+const APP_VERSION="2026-09-23";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -673,15 +686,11 @@ function Login({login,name,setSc,D}) {
           <button onClick={()=>login(e,p)} style={{...B(!D?.loaded?"#555":`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:14,color:D?.loaded?"#fff":"#eee",fontWeight:800}}>{D?.loaded?"Sign In →":"⏳ Loading…"}</button>
         </div>
 
-        <div style={{textAlign:"center",marginTop:8}}>
-          <div style={{fontSize:11,color:G.dim}}>Developed by <span style={{color:G.mut,fontWeight:700}}>Ashish Gupta</span></div>
-          <div style={{fontSize:10,color:G.dim,marginTop:3}}>© {new Date().getFullYear()} Nucleus Advisors</div>
-        </div>
         <div style={{textAlign:"center",marginTop:24,padding:"12px 0"}}>
           <div style={{fontSize:11,color:G.dim}}>Developed by</div>
           <div style={{fontSize:13,fontWeight:700,color:G.mut,marginTop:2}}>Ashish Gupta</div>
           <div style={{width:40,height:1,background:`linear-gradient(90deg,transparent,${G.dim},transparent)`,margin:"8px auto 0"}}/>
-          <div style={{fontSize:10,color:G.dim,marginTop:6}}>© {new Date().getFullYear()} Nucleus Advisors. All rights reserved.</div>
+          <div style={{fontSize:10,color:G.dim,marginTop:6}}>© {new Date().getFullYear()} Nucleus Advisors · v{APP_VERSION}</div>
         </div>
       </div>
     </div>
@@ -710,6 +719,7 @@ function LiveTimer({checkIn, checkOut}) {
 
 
 function Home({user,D,P,ST,AN,logout,setSc,unread}) {
+  const [outBusy,setOutBusy]=useState(false);
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
   const tm=D.teams.find(t=>t.id===user.teamId);
@@ -747,8 +757,14 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
 
     const evaluate=(la,lo,ac)=>{
       setGps({lat:la,lng:lo,ac:Math.round(ac)});
-      const assignedOffices=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
-      if(assignedOffices.length===0){setOffice({name:"Remote"});setStep("confirm");return;}
+      const ids=(user.officeIds||[]);
+      const assignedOffices=ids.map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
+      if(assignedOffices.length===0){
+        setLocErr(ids.length===0
+          ? "No office is linked to your profile, so your location cannot be checked. Ask the admin to assign your office (Staff → Edit → Offices). If you are working from home today, use WFH."
+          : "Your office link is broken — that office was removed or re-created. Ask the admin to open Staff → Edit and select your office again.");
+        setStep("err");return;
+      }
       const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200)+ac);
       if(near){
         setOffice(near);setStep("confirm");
@@ -819,25 +835,20 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     }
   };
   const doOut=async()=>{
+    if(outBusy)return;
+    setOutBusy(true);
     const checkOutTime=new Date().toISOString();
-    const go=async(cg)=>{
-      try{
-        // Update live location on checkout too
-        if(cg){
-          updateLiveLocation(user.id,{lat:cg.lat,lng:cg.lng,ac:0,ts:checkOutTime});
-        }
-        const ebm=(!rec.isWFH&&sh)?minsBeforeEnd(checkOutTime,sh.shiftEnd):0;
-        await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg,earlyBy:ebm});
-        notifyCheckout(user, fT(checkOutTime), wHr(rec.checkIn,checkOutTime)||"");
-        ST("👋 Checked out successfully!");
-      }catch(e){
-        ST("❌ Check-out failed! Please try again.","error");
-      }
-    };
-    navigator.geolocation?.getCurrentPosition(
-      p=>go({lat:p.coords.latitude,lng:p.coords.longitude}),
-      ()=>go(null)
-    );
+    try{
+      const cg=await quickPos(6000);                 // at most 6 seconds, then proceed anyway
+      const ebm=(!rec.isWFH&&sh)?minsBeforeEnd(checkOutTime,sh.shiftEnd):0;
+      await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg,earlyBy:ebm});
+      if(cg)updateLiveLocation(user.id,{lat:cg.lat,lng:cg.lng,ac:cg.ac||0,ts:checkOutTime}).catch(()=>{});
+      notifyCheckout(user,fT(checkOutTime),wHr(rec.checkIn,checkOutTime)||"");
+      ST(ebm>0?`👋 Checked out · ${ebm} min before shift end`:"👋 Checked out");
+    }catch(e){
+      ST("Check-out could not be saved. Check your internet and try again.","error");
+    }
+    setOutBusy(false);
   };
   return (
     <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
@@ -894,6 +905,19 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
             {step==="err"&&<div style={{textAlign:"center",padding:8}}>
               <div style={{fontSize:32,marginBottom:8}}>🚫</div>
               <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p>
+              {gps&&(()=>{
+                const list=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
+                return (
+                  <div style={{background:G.card2,borderRadius:10,padding:10,marginBottom:12,textAlign:"left",fontSize:11,color:G.mut}}>
+                    <div style={{fontWeight:700,color:G.txt,marginBottom:4}}>Location check</div>
+                    <div>You are at {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)} (accuracy ±{gps.ac||"?"}m)</div>
+                    {list.length===0
+                      ?<div style={{color:G.am}}>Offices linked to you: none</div>
+                      :list.map(o=>(<div key={o.id}>{o.name}: {Math.round(dist(gps.lat,gps.lng,o.lat,o.lng))}m away · allowed {o.radius||200}m</div>))}
+                    <a href={`https://maps.google.com/?q=${gps.lat},${gps.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl,display:"inline-block",marginTop:4}}>Open my position in Google Maps</a>
+                  </div>
+                );
+              })()}
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 <button onClick={()=>setStep("idle")} style={{...B(G.gold),color:"#fff",fontWeight:700}}>🔄 Try Again</button>
                 <button onClick={()=>{setWfh(true);setStep("idle");}} style={B(G.bl)}>🏠 Switch to WFH</button>
@@ -922,7 +946,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                 <button onClick={()=>{setStep("idle");}} style={{...B(G.bl),width:"100%",fontWeight:700,fontSize:13}}>🔄 Check In Again</button>
               </>
             ):(
-              <button onClick={doOut} style={{...B(G.am),width:"100%",fontWeight:700}}>🚪 Check Out</button>
+              <button onClick={doOut} disabled={outBusy} style={{...B(outBusy?G.dim:G.am),width:"100%",fontWeight:700}}>{outBusy?"Checking out…":"🚪 Check Out"}</button>
             )}
           </div>
         )}
@@ -2599,7 +2623,10 @@ function SC({D,P,ST}) {
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13}}>{u.name}{u.designation&&<span style={{fontSize:11,color:G.mut}}> — {u.designation}</span>}</div>
               <div style={{fontSize:11,color:G.dim}}>{u.email}</div>
-              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).length} office(s) · 📅 {calsOf(D).find(x=>x.id===calIdOf(u))?.name||"Default"}</div>
+              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).filter(id=>D.offices.some(o=>o.id===id)).length} office(s) · 📅 {calsOf(D).find(x=>x.id===calIdOf(u))?.name||"Default"}</div>
+              {(u.officeIds||[]).filter(id=>D.offices.some(o=>o.id===id)).length===0&&(
+                <div style={{fontSize:11,color:G.am,fontWeight:700,marginTop:2}}>⚠ No office linked — cannot check in from office</div>
+              )}
               {mgr&&<div style={{fontSize:11,color:G.mut}}>Reports to: <span style={{color:G.gold}}>{mgr.name}</span></div>}
               <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:3}}>
                 <Chip bg={roleColor[u.role]||G.dim} label={ROLE_LABELS[u.role]||u.role} sm/>
@@ -2729,11 +2756,14 @@ function OC({D,P,ST}) {
       )}
       {D.offices.map(o=>(
         <div key={o.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m</div></div>
+          <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m · {(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length} staff</div></div>
           {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setF({name:o.name,lat:String(o.lat),lng:String(o.lng),radius:o.radius});setEditO(o.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
-            <button onClick={()=>{if(!confirm("Delete?"))return;P({...D,offices:D.offices.filter(x=>x.id!==o.id)});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
+            <button onClick={()=>{
+              const n=(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length;
+              if(!confirm(n?`${n} staff are linked to "${o.name}". If you delete it they cannot check in until you assign them another office.\n\nTo move an office, use Edit instead of deleting.\n\nDelete anyway?`:`Delete "${o.name}"?`))return;
+              P({...D,offices:D.offices.filter(x=>x.id!==o.id),users:(D.users||[]).map(u=>({...u,officeIds:(u.officeIds||[]).filter(id=>id!==o.id)}))});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
           </div>
         </div>
       ))}
@@ -2915,6 +2945,7 @@ function Profile({user,D,P,ST,setSc,logout}) {
           ["Reporting To", D.users?.find(u=>u.id===user.reportingTo)?.name||"—"],
           ["Designation", user.designation||"—"],
           ["Employee Type", user.employeeType==="articled"?"Articled Assistant (CA)":"Employee"],
+          ["App version", APP_VERSION],
         ].map(([lb,v])=>(
           <div key={lb} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${G.bdr}`}}>
             <span style={{fontSize:12,color:G.mut,fontWeight:600}}>{lb}</span>
