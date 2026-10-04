@@ -1822,8 +1822,6 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
     :isHOD
     ?D.users.filter(u=>u.role!=="admin"&&(u.teamId===user.teamId||(D.teams||[]).some(t=>t.id===u.teamId&&t.hodId===user.id)))
     :D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId)||u.id===user.id);
-  const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
-  const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const [flt,setFlt]=useState({q:"",teamId:"",officeId:"",type:"",role:""});
   const [showFlt,setShowFlt]=useState(false);
   const vuAll=vu0;
@@ -1836,6 +1834,8 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
     return true;
   });
   const fltOn=!!(flt.q||flt.teamId||flt.officeId||flt.type||flt.role);
+  const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
+  const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
   const mon=tod().slice(0,7);
   const pX=vu.filter(u=>{const s=leIncidents(D,u,mon);return s.exception||s.open>0;}).length;
   const pC=(D.workApprovals||[]).filter(w=>w.status==="pending"&&vu.some(u=>u.id===w.userId)).length;
