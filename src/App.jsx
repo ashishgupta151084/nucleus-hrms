@@ -288,6 +288,50 @@ const leaveLedger=(D,user,type)=>{
   });
   return {rows,balance:bal};
 };
+// Every day of a month for one person: what kind of day it was, what was
+// recorded, and why. Used by the day-wise view and the detailed export.
+const dayWise=(D,u,yr,mo)=>{
+  const hols=holsFor(D,u), wo=u?.weeklyOff||"sun_sat", sh=shiftFor(D,u);
+  const rule=leRuleFor(D,u);
+  const today=tod();
+  return daysOfMonth(yr,mo).map(ds=>{
+    const hol=(hols||[]).find(h=>h.date===ds);
+    const off=isDayOff(ds,hols,wo);
+    const recs=(D.attendance||[]).filter(a=>a.userId===u.id&&a.date===ds&&a.checkIn)
+      .sort((a,b)=>a.checkIn.localeCompare(b.checkIn));
+    const first=recs[0]||null;
+    const lastOut=recs.filter(r=>r.checkOut).slice(-1)[0]||null;
+    const mins=recs.reduce((s,r)=>s+wMin(r.checkIn,r.checkOut),0);
+    const lv=(D.leaves||[]).find(l=>l.userId===u.id&&(l.status==="approved"||l.status==="pending")&&
+      ds>=l.from&&ds<=((l.duration==="half"||l.type==="halfday")?l.from:(l.to||l.from)));
+    const wa=(D.workApprovals||[]).find(w=>w.userId===u.id&&w.date===ds&&w.status==="approved"&&!w.creditCancelled);
+    const lateM=first&&sh&&!first.isWFH?lateBy(first.checkIn,sh.shiftStart):0;
+    const earlyM=lastOut&&sh&&!first?.isWFH?minsBeforeEnd(lastOut.checkOut,sh.shiftEnd):0;
+    let status;
+    if(recs.length) status=first.isWFH||first.status==="wfh"?"WFH":lateM>rule.lateMins?"Late":"Present";
+    else if(lv) status=`${LEAVE_LABEL[lv.type]||lv.type} leave${(lv.duration==="half"||lv.type==="halfday")?" (half)":""}${lv.status==="pending"?" — pending":""}`;
+    else if(hol) status=hol.name;
+    else if(off) status="Weekly off";
+    else if(ds>today) status="—";
+    else status="Absent";
+    return {date:ds,
+      day:new Date(ds+"T12:00:00").toLocaleDateString([],{weekday:"short"}),
+      dayType:hol?`Holiday — ${hol.name}`:off?"Weekly off":"Working day",
+      status,
+      inT:first?fT(first.checkIn):"",
+      outT:lastOut?fT(lastOut.checkOut):(first?"not checked out":""),
+      hours:mins?`${Math.floor(mins/60)}h ${mins%60}m`:"",
+      lateM:lateM>rule.lateMins?lateM:0,
+      earlyM:earlyM>rule.earlyMins?earlyM:0,
+      office:first?(first.officeName||""):"",
+      mode:first?(first.isWFH||first.status==="wfh"?"WFH":"Office"):"",
+      sessions:recs.length,
+      regularized:!!(first&&(first.lateReg||first.earlyReg||first.lateApproved)),
+      compOffDay:!!wa,
+      note:[wa?"approved to work on day off":"",first&&!lastOut?"missing check-out":"",
+        recs.length>1?`${recs.length} check-ins`:"",lv&&recs.length?"leave + attendance":""].filter(Boolean).join("; ")};
+  });
+};
 const leaveBalances=(D,user)=>{
   const isAA=user?.employeeType==="articled";
   const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
@@ -1773,13 +1817,25 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
   const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
-  const vu=isA||isHR
+  const vu0=isA||isHR
     ?D.users.filter(u=>u.role!=="admin")
     :isHOD
     ?D.users.filter(u=>u.role!=="admin"&&(u.teamId===user.teamId||(D.teams||[]).some(t=>t.id===u.teamId&&t.hodId===user.id)))
     :D.users.filter(u=>u.reportingTo===user.id||(user.managedTeams||[]).includes(u.teamId)||u.id===user.id);
   const pL=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const pR=(D.regularizations||[]).filter(r=>r.status==="pending"&&vu.some(u=>u.id===r.userId)).length;
+  const [flt,setFlt]=useState({q:"",teamId:"",officeId:"",type:"",role:""});
+  const [showFlt,setShowFlt]=useState(false);
+  const vuAll=vu0;
+  const vu=vuAll.filter(u=>{
+    if(flt.q&&!(`${u.name} ${u.email||""} ${u.designation||""}`.toLowerCase().includes(flt.q.trim().toLowerCase())))return false;
+    if(flt.teamId&&u.teamId!==flt.teamId)return false;
+    if(flt.officeId&&!(u.officeIds||[]).includes(flt.officeId))return false;
+    if(flt.type&&(u.employeeType||"employee")!==flt.type)return false;
+    if(flt.role&&u.role!==flt.role)return false;
+    return true;
+  });
+  const fltOn=!!(flt.q||flt.teamId||flt.officeId||flt.type||flt.role);
   const mon=tod().slice(0,7);
   const pX=vu.filter(u=>{const s=leIncidents(D,u,mon);return s.exception||s.open>0;}).length;
   const pC=(D.workApprovals||[]).filter(w=>w.status==="pending"&&vu.some(u=>u.id===w.userId)).length;
@@ -1806,6 +1862,56 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
             {id==="rg"&&pR>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pR}</span>}
           </button>
         ))}
+      </div>
+      <div style={{marginBottom:10}}>
+        <div style={{display:"flex",gap:8}}>
+          <input style={{...I,flex:1}} value={flt.q} onChange={e=>setFlt({...flt,q:e.target.value})} placeholder="Search staff by name…"/>
+          <button onClick={()=>setShowFlt(!showFlt)} style={{...B(fltOn?G.gold:G.card),border:fltOn?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"0 14px",flexShrink:0}}>
+            Filters{fltOn?" •":""}
+          </button>
+        </div>
+        {showFlt&&(
+          <div style={{...K,marginTop:8,marginBottom:0,padding:12}}>
+            <div style={{display:"flex",gap:8}}>
+              <div style={{flex:1}}>
+                <label style={L}>Team</label>
+                <select style={I} value={flt.teamId} onChange={e=>setFlt({...flt,teamId:e.target.value})}>
+                  <option value="">All teams</option>
+                  {(D.teams||[]).map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </div>
+              <div style={{flex:1}}>
+                <label style={L}>Office</label>
+                <select style={I} value={flt.officeId} onChange={e=>setFlt({...flt,officeId:e.target.value})}>
+                  <option value="">All offices</option>
+                  {(D.offices||[]).map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <div style={{flex:1}}>
+                <label style={L}>Employee type</label>
+                <select style={I} value={flt.type} onChange={e=>setFlt({...flt,type:e.target.value})}>
+                  <option value="">All</option><option value="employee">Employee</option><option value="articled">Articled</option>
+                </select>
+              </div>
+              <div style={{flex:1}}>
+                <label style={L}>Role</label>
+                <select style={I} value={flt.role} onChange={e=>setFlt({...flt,role:e.target.value})}>
+                  <option value="">All roles</option>
+                  {Object.entries(ROLE_LABELS).filter(([k])=>k!=="admin").map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                </select>
+              </div>
+            </div>
+            <button onClick={()=>{setFlt({q:"",teamId:"",officeId:"",type:"",role:""});}} style={{...B(G.card2),width:"100%",border:`1px solid ${G.bdr}`,fontSize:12,marginTop:4}}>Clear filters</button>
+          </div>
+        )}
+        {fltOn&&(
+          <div style={{fontSize:11,color:G.mut,marginTop:6}}>
+            Showing <b>{vu.length}</b> of {vuAll.length} staff{" "}
+            <span onClick={()=>setFlt({q:"",teamId:"",officeId:"",type:"",role:""})} style={{color:G.bl,marginLeft:8,cursor:"pointer",textDecoration:"underline"}}>clear</span>
+          </div>
+        )}
       </div>
       {tab==="ov"&&<OV {...tp}/>}
       {tab==="live"&&<LV {...tp}/>}
@@ -2100,8 +2206,8 @@ function AT({D,vu,P,ST,isA}) {
 }
 
 function LT({D,vu,P,ST,AN,isA}) {
-  const [fl,setFl]=useState("pending"),[eid,setEid]=useState(null),[ef,setEf]=useState(null);
-  const lvs=(D.leaves||[]).filter(l=>vu.some(u=>u.id===l.userId)&&(fl==="all"||l.status===fl)).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
+  const [fl,setFl]=useState("pending"),[eid,setEid]=useState(null),[ef,setEf]=useState(null),[ft,setFt]=useState("");
+  const lvs=(D.leaves||[]).filter(l=>vu.some(u=>u.id===l.userId)&&(fl==="all"||l.status===fl)&&(!ft||l.type===ft)).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
   const pd=(D.leaves||[]).filter(l=>l.status==="pending"&&vu.some(u=>u.id===l.userId)).length;
   const tL={casual:"🏖",sick:"🤒",compoff:"🔄",halfday:"🌓",early:"🏃"};
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
@@ -2122,7 +2228,11 @@ function LT({D,vu,P,ST,AN,isA}) {
           <button key={v} onClick={()=>setFl(v)} style={{...B(fl===v?G.gold:G.card),fontSize:12,padding:"6px 10px",border:fl===v?"none":`1px solid ${G.bdr}`,color:fl===v?"#fff":G.mut,flexShrink:0}}>{lb}</button>
         ))}
       </div>
-      {lvs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No {fl} leaves.</div>}
+      <select style={{...I,marginBottom:10}} value={ft} onChange={e=>setFt(e.target.value)}>
+        <option value="">All leave types</option>
+        {LEAVE_TYPES.map(([t,lb])=><option key={t} value={t}>{lb}</option>)}
+      </select>
+      {lvs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No {fl==="all"?"":fl+" "}leaves{ft?` of type ${LEAVE_LABEL[ft]}`:""}.</div>}
       {lvs.map(l=>{
         const ed=eid===l.id;
         return (
@@ -2599,7 +2709,9 @@ function LB({D,P,ST,AN,user,vu}) {
 }
 
 function RT({D,vu,P,ST,AN}) {
-  const rgs=(D.regularizations||[]).filter(r=>vu.some(u=>u.id===r.userId)).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
+  const [fs,setFs]=useState("pending");
+  const all=(D.regularizations||[]).filter(r=>vu.some(u=>u.id===r.userId));
+  const rgs=all.filter(r=>fs==="all"||r.status===fs).sort((a,b)=>new Date(b.appliedOn)-new Date(a.appliedOn));
   const sc={pending:G.am,approved:G.gr,rejected:G.rd};
   const ap=(id)=>{
     const r=(D.regularizations||[]).find(x=>x.id===id);if(!r)return;
@@ -2634,8 +2746,17 @@ function RT({D,vu,P,ST,AN}) {
   };
   return (
     <>
+      <div style={{display:"flex",gap:5,marginBottom:10,overflowX:"auto"}}>
+        {[["pending","Pending"],["approved","Approved"],["rejected","Rejected"],["all","All"]].map(([v,lb])=>{
+          const n=all.filter(r=>v==="all"||r.status===v).length;
+          return (
+            <button key={v} onClick={()=>setFs(v)} style={{...B(fs===v?G.gold:G.card),fontSize:12,padding:"6px 10px",
+              border:fs===v?"none":`1px solid ${G.bdr}`,color:fs===v?"#fff":G.mut,flexShrink:0}}>{lb}{n?` (${n})`:""}</button>
+          );
+        })}
+      </div>
       <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}><div style={{color:G.gold,fontWeight:700,fontSize:13}}>📝 Regularization Requests</div><div style={{color:G.dim,fontSize:12,marginTop:3}}>Staff can fix missed attendance entries.</div></div>
-      {rgs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No requests.</div>}
+      {rgs.length===0&&<div style={{textAlign:"center",color:G.dim,padding:36}}>No {fs==="all"?"":fs+" "}requests.</div>}
       {rgs.map(r=>(
         <div key={r.id} style={K}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
@@ -2660,6 +2781,8 @@ function PT({D,vu,ST,user}) {
     const uWO=u.weeklyOff||"sun_sat";
     const wd=workingDaysFor(yr,mo,uHols,uWO);
     const offDays=daysOfMonth(yr,mo).length-wd;
+    // Days that have actually happened — a future date is not an absence
+    const wdSoFar=daysOfMonth(yr,mo).filter(ds=>ds<=tod()&&!isDayOff(ds,uHols,uWO)).length;
     const pol=(polAll[u.employeeType||"employee"]||DP_EMP);
     const ar=D.attendance.filter(a=>a.userId===u.id&&a.date>=s&&a.date<=e);
     // One attended day per date (re-check-ins don't double count); days off are not paid twice
@@ -2680,14 +2803,34 @@ function PT({D,vu,ST,user}) {
     const co=ap.filter(l=>l.type==="compoff").reduce((x,l)=>x+dIn(l),0);
     const tm=ar.reduce((x,r)=>x+wMin(r.checkIn,r.checkOut),0),am=days.length?Math.round(tm/days.length):0;
     const tp=days.filter(r=>!leaveOn.has(r.date)).length;
-    const pd=Math.min(wd,Math.round((tp+cl+sl+st+co)*10)/10),ab=Math.max(0,Math.round((wd-pd)*10)/10);
+    const pd=Math.min(wd,Math.round((tp+cl+sl+st+co)*10)/10),ab=Math.max(0,Math.round((wdSoFar-pd)*10)/10);
     const team=D.teams.find(t=>t.id===u.teamId);
     const cal=calsOf(D).find(x=>x.id===calIdOf(u));
-    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,pr,lt,wf,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
+    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,wdSoFar,pr,lt,wf,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
+  const [open,setOpen]=useState(null);         // staff shown day-by-day
+  const dayHead=["Staff","Date","Day","Day type","Status","Check in","Check out","Hours","Late (min)","Early (min)","Mode","Office","Sessions","Regularized","Comp off day","Remarks"];
+  const dayRow=(u,d)=>[u.name,d.date,d.day,d.dayType,d.status,d.inT,d.outT,d.hours,d.lateM||"",d.earlyM||"",d.mode,d.office,d.sessions||"",d.regularized?"Yes":"",d.compOffDay?"Yes":"",d.note];
+  const csvDownload=(rows,file)=>{
+    const csv=rows.map(r=>r.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a=document.createElement("a");
+    a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
+    a.download=file;a.click();
+  };
+  const expDayOne=(u)=>{
+    csvDownload([dayHead,...dayWise(D,u,yr,mo).map(d=>dayRow(u,d))],
+      `${u.name.replace(/[^a-z0-9]+/gi,"_")}_${ms[mo-1]}_${yr}_daywise.csv`);
+    ST(`${u.name} — day-wise record downloaded`);
+  };
+  const expDayAll=()=>{
+    const rows=[dayHead];
+    vu.forEach(u=>dayWise(D,u,yr,mo).forEach(d=>rows.push(dayRow(u,d))));
+    csvDownload(rows,`Nucleus_DayWise_${ms[mo-1]}_${yr}.csv`);
+    ST("Day-wise record for all staff downloaded");
+  };
   const exp=()=>{
-    const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
-    const dr=rows.map(r=>[r.name,r.email,r.team,r.cal,r.offDays,r.wd,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
+    const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Working Days So Far","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
+    const dr=rows.map(r=>[r.name,r.email,r.team,r.cal,r.offDays,r.wd,r.wdSoFar,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
     const csv=[h,...dr].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=`Nucleus_Payroll_${ms[mo-1]}_${yr}.csv`;a.click();ST("💰 Payroll exported!");
   };
@@ -2698,12 +2841,16 @@ function PT({D,vu,ST,user}) {
         <div style={{flex:2}}><label style={L}>Month</label><select style={I} value={mo} onChange={e=>setMo(Number(e.target.value))}>{ms.map((m,i)=><option key={i} value={i+1}>{m}</option>)}</select></div>
         <div style={{flex:1}}><label style={L}>Year</label><input type="number" style={I} value={yr} onChange={e=>setYr(Number(e.target.value))}/></div>
       </div>
-      <button onClick={exp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",marginBottom:12,fontSize:14,color:"#fff",fontWeight:800}}>📥 Export to Excel</button>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <button onClick={exp} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:1,fontSize:13,color:"#fff",fontWeight:800}}>Monthly summary</button>
+        <button onClick={expDayAll} style={{...B(G.bl),flex:1,fontSize:13,fontWeight:800}}>Day-wise detail</button>
+      </div>
+      <div style={{fontSize:11,color:G.dim,marginBottom:10,marginTop:-4}}>Tap any staff member below for their day-by-day record.</div>
       <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>{ms[mo-1]} {yr} — working days vary by weekly off & holiday calendar</div>
       {rows.map(r=>(
         <div key={r.id} style={K}>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-            <div><div style={{fontWeight:800}}>{r.name}</div><div style={{fontSize:12,color:G.dim}}>{r.team} · 📅 {r.cal}</div><div style={{fontSize:11,color:G.dim}}>{r.wd} working days · {r.offDays} off</div></div>
+          <div onClick={()=>setOpen(open===r.id?null:r.id)} style={{display:"flex",justifyContent:"space-between",marginBottom:8,cursor:"pointer"}}>
+            <div><div style={{fontWeight:800}}>{r.name}</div><div style={{fontSize:12,color:G.dim}}>{r.team} · 📅 {r.cal}</div><div style={{fontSize:11,color:G.dim}}>{r.wd} working days · {r.offDays} off{r.wdSoFar<r.wd?` · ${r.wdSoFar} so far`:""}</div></div>
             <div style={{textAlign:"right"}}><div style={{fontSize:20,fontWeight:900,color:r.ab>3?G.rd:G.gold}}>{r.pd}<span style={{fontSize:11,color:G.dim}}>/{r.wd}</span></div><div style={{fontSize:9,color:G.dim}}>paid</div></div>
           </div>
           <div style={{background:G.card2,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
@@ -2713,6 +2860,39 @@ function PT({D,vu,ST,user}) {
             ))}
           </div>
           {r.lt>0&&<div style={{marginTop:6,background:"#fff6e8",border:`1px solid ${G.am}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.am}}>⚠️ {r.lt} late — apply deduction per policy</div>}
+          {open===r.id&&(()=>{
+            const u=vu.find(x=>x.id===r.id); if(!u)return null;
+            const dd=dayWise(D,u,yr,mo);
+            const col=d=>d.status==="Absent"?G.rd:d.status==="Late"?G.am:d.status==="Present"?G.gr:d.status==="WFH"?G.bl:
+              d.status.includes("leave")?G.pu:G.dim;
+            return (
+              <div style={{marginTop:10,borderTop:`1px solid ${G.bdr}`,paddingTop:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <div style={{fontWeight:700,fontSize:12}}>Day-by-day · {ms[mo-1]} {yr}</div>
+                  <button onClick={e=>{e.stopPropagation();expDayOne(u);}} style={{...B(G.bl),fontSize:11,padding:"5px 10px"}}>Download</button>
+                </div>
+                {dd.map(d=>(
+                  <div key={d.date} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"5px 0",borderTop:`1px solid ${G.bdr}`,
+                    opacity:d.dayType==="Working day"?1:.65}}>
+                    <div style={{width:46,flexShrink:0}}>
+                      <div style={{fontSize:12,fontWeight:700}}>{d.date.slice(8)} {d.day}</div>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:700,color:col(d)}}>{d.status}</div>
+                      {(d.inT||d.outT)&&<div style={{fontSize:11,color:G.mut}}>
+                        {d.inT&&`in ${d.inT}`}{d.outT&&` · out ${d.outT}`}{d.hours&&` · ${d.hours}`}
+                      </div>}
+                      {(d.lateM||d.earlyM||d.note)&&<div style={{fontSize:11,color:G.dim}}>
+                        {d.lateM?`${d.lateM}m late`:""}{d.lateM&&d.earlyM?" · ":""}{d.earlyM?`${d.earlyM}m early`:""}
+                        {d.note?((d.lateM||d.earlyM)?" · ":"")+d.note:""}
+                      </div>}
+                    </div>
+                    {d.office&&<div style={{fontSize:10,color:G.dim,flexShrink:0,maxWidth:90,textAlign:"right"}}>{d.office}</div>}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
           {r.ab>3&&<div style={{marginTop:4,background:"#fdecea",border:`1px solid ${G.rd}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.rd}}>🚨 {r.ab} absent — high absenteeism</div>}
         </div>
       ))}
@@ -2926,6 +3106,8 @@ function HC({D,P,ST}) {
 }
 
 function SC({D,P,ST}) {
+  const [sq,setSq]=useState("");
+  const [sTeam,setSTeam]=useState("");
   const [sa,setSa]=useState(false);
   const [editU,setEditU]=useState(null);
   const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:DEFAULT_CAL,articleshipStart:"",doj:"",mobile:""};
@@ -3021,7 +3203,18 @@ function SC({D,P,ST}) {
           </div>
         </div>
       )}
-      {D.users.filter(u=>u.role!=="admin").map(u=>{
+      <div style={{display:"flex",gap:8,marginBottom:10}}>
+        <input style={{...I,flex:2}} value={sq} onChange={e=>setSq(e.target.value)} placeholder="Search staff…"/>
+        <select style={{...I,flex:1}} value={sTeam} onChange={e=>setSTeam(e.target.value)}>
+          <option value="">All teams</option>
+          {(D.teams||[]).map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </div>
+      {(()=>{const n=D.users.filter(u=>u.role!=="admin").filter(u=>(!sq||`${u.name} ${u.email||""}`.toLowerCase().includes(sq.toLowerCase()))&&(!sTeam||u.teamId===sTeam)).length;
+        return (sq||sTeam)?<div style={{fontSize:11,color:G.mut,marginBottom:8}}>{n} staff match</div>:null;})()}
+      {D.users.filter(u=>u.role!=="admin")
+        .filter(u=>(!sq||`${u.name} ${u.email||""} ${u.designation||""}`.toLowerCase().includes(sq.toLowerCase()))&&(!sTeam||u.teamId===sTeam))
+        .map(u=>{
         const team=D.teams.find(t=>t.id===u.teamId);
         const mgr=D.users.find(x=>x.id===u.reportingTo);
         return(
