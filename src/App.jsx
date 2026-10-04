@@ -177,8 +177,10 @@ const daysOfMonth=(y,m)=>{
 // ── Leave balances (counted in DAYS, not applications) ──────────────
 // Leave year runs April–March. Weekly offs and holidays inside a leave are not charged.
 // Half day is a duration (0.5), available on every leave type.
-const LEAVE_TYPES=[["casual","Casual"],["sick","Sick"],["studyleave","Study"],["compoff","Comp Off"]];
-const LEAVE_LABEL={casual:"Casual",sick:"Sick",studyleave:"Study",compoff:"Comp Off",halfday:"Half Day (old)",early:"Early (old)"};
+const LEAVE_TYPES=[["casual","Casual"],["sick","Sick"],["leave","Study Leave"],["compoff","Comp Off"]];
+const LEAVE_LABEL={casual:"Casual",sick:"Sick",leave:"Study Leave",studyleave:"Study (old)",compoff:"Comp Off",halfday:"Half Day (old)",early:"Early (old)"};
+// Leave already recorded under the old split types still counts against the single pool
+const AA_LEAVE_TYPES=["leave","sick","studyleave"];
 const LEAVE_YEAR_START=4;
 const leaveYear=ds=>{
   const [y,m]=ds.split("-").map(Number), sy=m>=LEAVE_YEAR_START?y:y-1, mm=String(LEAVE_YEAR_START).padStart(2,"0");
@@ -203,55 +205,90 @@ const monthsServed=(start,today)=>{
 const openingFor=(D,uid,t)=>(D.leaveOpenings||[])
   .filter(o=>o.userId===uid&&o.type===t&&o.asOn<=tod())
   .sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""))[0]||null;
-const leaveBalances=(D,user)=>{
+// Months added to a date, keeping the day where possible
+const addMonths=(ds,n)=>{
+  const [y,m,d]=ds.split("-").map(Number);
+  const t=new Date(y,m-1+n,1);
+  const last=new Date(t.getFullYear(),t.getMonth()+1,0).getDate();
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(Math.min(d,last)).padStart(2,"0")}`;
+};
+// Entitlement for an employee in one leave year, pro-rated if they joined during it.
+// Joining on or before the 15th earns that whole month.
+const empEntitlement=(annual,doj,ys,ye)=>{
+  if(!doj||doj<ys)return annual;
+  if(doj>=ye)return 0;
+  const [jy,jm,jd]=doj.split("-").map(Number);
+  const startM=jd<=15?jm:jm+1;
+  const monthsLeft=(Number(ye.slice(0,4))*12+Number(ye.slice(5,7)))-(jy*12+startM);
+  return Math.max(0,Math.round(annual*Math.min(12,Math.max(0,monthsLeft))/12*2)/2);
+};
+// Every movement for one person and one leave type, oldest first, with a running
+// balance. Used by the balance tiles, the staff ledger view and the Excel export.
+const leaveLedger=(D,user,type)=>{
   const isAA=user?.employeeType==="articled";
   const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
   const [ys,ye]=leaveYear(tod());
+  const rows=[];
+  if(type==="compoff"){
+    const L=compOffLedger(D,user);
+    L.credits.forEach(x=>rows.push({date:x.date,kind:x.kind==="set"?"set":"earned",
+      label:x.kind==="set"?"Balance set by HR":x.kind==="opening"?"Comp off added":`Worked on ${fD(x.date)}`,
+      inD:x.kind==="set"?null:x.value,setTo:x.kind==="set"?x.value:null,note:x.note||"",expires:x.expires}));
+    L.usage.forEach(u=>rows.push({date:u.leave.from,kind:"leave",label:`Comp off leave${u.leave.duration==="half"?" (half day)":""}`,
+      outD:u.days,note:u.leave.status==="pending"?"pending approval":u.leave.reason||""}));
+  } else if(isAA){
+    const rate=Number(pol.leavePerMonth??DP_AA.leavePerMonth)||0;
+    const start=user?.articleshipStart||null;
+    if(start){
+      const n=monthsServed(start,tod());
+      for(let i=1;i<=n;i++){const d=addMonths(start,i);rows.push({date:d,kind:"accrual",label:`Month ${i} completed`,inD:rate});}
+    }
+    (D.leaveOpenings||[]).filter(o=>o.userId===user.id&&AA_LEAVE_TYPES.includes(o.type)&&o.asOn<=tod())
+      .forEach(o=>rows.push({date:o.asOn,kind:"set",label:"Balance set by "+(o.byName||"HR"),setTo:Number(o.days)||0,note:o.note||""}));
+    (D.leaves||[]).filter(l=>l.userId===user.id&&AA_LEAVE_TYPES.includes(l.type)&&(l.status==="approved"||l.status==="pending")&&(!start||l.from>=start))
+      .forEach(l=>rows.push({date:l.from,kind:"leave",label:`Study leave${(l.duration==="half")?" (half day)":""}`,
+        outD:leaveDays(l,D,user),note:l.status==="pending"?"pending approval":(l.reason||"")}));
+  } else {
+    const annual=Number(pol[type])||0;
+    if(annual>0){
+      const ent=empEntitlement(annual,user?.doj,ys,ye);
+      rows.push({date:(user?.doj&&user.doj>ys)?user.doj:ys,kind:"accrual",
+        label:(user?.doj&&user.doj>ys)?`Entitlement on joining (${ent} of ${annual})`:"Yearly entitlement",inD:ent});
+    }
+    (D.leaveOpenings||[]).filter(o=>o.userId===user.id&&o.type===type&&o.asOn<=tod()&&o.asOn>=ys&&o.asOn<ye)
+      .forEach(o=>rows.push({date:o.asOn,kind:"set",label:"Balance set by "+(o.byName||"HR"),setTo:Number(o.days)||0,note:o.note||""}));
+    (D.leaves||[]).filter(l=>l.userId===user.id&&(l.type===type||(type==="casual"&&l.type==="halfday"))&&(l.status==="approved"||l.status==="pending")&&l.from>=ys&&l.from<ye)
+      .forEach(l=>rows.push({date:l.from,kind:"leave",label:`${LEAVE_LABEL[type]} leave${(l.duration==="half"||l.type==="halfday")?" (half day)":""}`,
+        outD:leaveDays(l,D,user,ys,ye),note:l.status==="pending"?"pending approval":(l.reason||"")}));
+  }
+  const order={accrual:0,earned:0,set:1,leave:2};
+  rows.sort((a,b)=>a.date.localeCompare(b.date)||(order[a.kind]-order[b.kind]));
+  let bal=0;
+  rows.forEach(r=>{
+    if(r.kind==="set"){ r.adjust=Math.round((r.setTo-bal)*10)/10; bal=r.setTo; }
+    else bal=Math.round((bal+(r.inD||0)-(r.outD||0))*10)/10;
+    r.balance=bal;
+  });
+  return {rows,balance:bal};
+};
+const leaveBalances=(D,user)=>{
+  const isAA=user?.employeeType==="articled";
+  const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
   const out=[];
   LEAVE_TYPES.forEach(([t,label])=>{
     if(t==="compoff"){ const L=compOffLedger(D,user); out.push({type:t,label,total:null,left:L.available,used:L.used,opening:L.opening}); return; }
-    if(isAA){
-      // Articled: earned per completed month of articleship, never resets
-      if(!["sick","studyleave"].includes(t))return;
-      const rate=Number(pol[t+"PerMonth"]??(isAA?DP_AA:DP_EMP)[t+"PerMonth"])||0; if(rate<=0)return;
-      const start=user.articleshipStart||null;
-      const op=openingFor(D,user.id,t);
-      const counted=(from)=>(D.leaves||[])
-        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&l.type===t&&(!from||(l.to||l.from)>=from))
-        .reduce((s,l)=>s+leaveDays(l,D,user,from||undefined),0);
-      if(op){
-        // Balance fixed by HR on op.asOn; afterwards add months earned and subtract leave taken
-        const after=addDays(op.asOn,1);
-        const mAfter=start?Math.max(0,monthsServed(start,tod())-monthsServed(start,op.asOn)):monthsServed(op.asOn,tod());
-        const total=Math.round((Number(op.days)+mAfter*rate)*10)/10;
-        const used=counted(after);
-        out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),
-          accrual:{rate,months:mAfter,start},opening:op});
-        return;
-      }
-      const months=monthsServed(start,tod());
-      const total=Math.round(months*rate*10)/10;
-      const used=counted(start);
-      out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),
-        accrual:{rate,months,start}});
-      return;
-    }
-    const op=openingFor(D,user.id,t);
-    if(op&&op.asOn>=ys&&op.asOn<ye){
-      // HR fixed the balance on op.asOn; count only leave after that date, within this leave year
-      const after=addDays(op.asOn,1);
-      const used=(D.leaves||[])
-        .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&(l.type===t||(t==="casual"&&l.type==="halfday")))
-        .reduce((s,l)=>s+leaveDays(l,D,user,after,ye),0);
-      const total=Number(op.days)||0;
-      out.push({type:t,label,total,used,left:Math.max(0,Math.round((total-used)*10)/10),opening:op});
-      return;
-    }
-    const total=Number(pol[t])||0; if(total<=0)return;
-    const used=(D.leaves||[])
-      .filter(l=>l.userId===user.id&&(l.status==="approved"||l.status==="pending")&&(l.type===t||(t==="casual"&&l.type==="halfday")))
-      .reduce((s,l)=>s+leaveDays(l,D,user,ys,ye),0);
-    out.push({type:t,label,total,used,left:Math.max(0,total-used)});
+    if(isAA&&t!=="leave")return;
+    if(!isAA&&t==="leave")return;
+    const rate=isAA?(Number(pol.leavePerMonth??DP_AA.leavePerMonth)||0):0;
+    const annual=isAA?0:(Number(pol[t])||0);
+    if(isAA?rate<=0:annual<=0)return;
+    const lg=leaveLedger(D,user,t);
+    const op=isAA?(D.leaveOpenings||[]).filter(o=>o.userId===user.id&&AA_LEAVE_TYPES.includes(o.type)&&o.asOn<=tod()).sort((a,b)=>b.asOn.localeCompare(a.asOn))[0]||null:openingFor(D,user.id,t);
+    const accr=(from)=>lg.rows.filter(r=>r.kind==="accrual"&&(!from||r.date>from)).reduce((s,r)=>s+(r.inD||0),0);
+    const total=op?Math.round((Number(op.days)+accr(op.asOn))*10)/10:accr(null);
+    const used=lg.rows.filter(r=>r.kind==="leave"&&(!op||r.date>op.asOn)).reduce((s,r)=>s+(r.outD||0),0);
+    out.push({type:t,label,total,used,left:lg.balance,opening:op||null,ledger:lg.rows,
+      accrual:isAA?{rate,months:monthsServed(user?.articleshipStart||null,tod()),start:user?.articleshipStart||null}:null});
   });
   return out;
 };
@@ -404,7 +441,7 @@ const ld=(k,f)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):f;}c
 const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
 
 const DP_EMP={casual:12,sick:12};
-const DP_AA={sickPerMonth:1,studyleavePerMonth:1};
+const DP_AA={leavePerMonth:1};
 const DP={employee:DP_EMP,articled:DP_AA};
 const GRACE_MINS=15;
 // SaaS features (trial countdown, plan limits, upgrade prompts).
@@ -659,6 +696,7 @@ export default function App() {
       {sc==="reg"&&<Reg {...props}/>}
       {sc==="profile"&&<Profile {...props} logout={logout}/>}
       {sc==="workreq"&&<WorkReq {...props}/>}
+      {sc==="help"&&<Help {...props}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
       {sc==="teamdash"&&<Dash {...props}/>}
@@ -666,6 +704,286 @@ export default function App() {
       {sc==="register"&&<Register {...props}/>}
       {sc==="superadmin"&&<SuperAdmin {...props}/>}
       {toast&&<Msg t={toast}/>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// IN-APP USER MANUAL
+// Edit the text below and it updates for everyone on the next deploy.
+// Each "## " section starts with @roles:  staff | manager | hod | hr | all
+// Supported formatting: ## section, ### heading, - bullet, | tables |,
+// **bold**, and blank lines between paragraphs.
+// ══════════════════════════════════════════════════════════════════
+const HELP_MD = `
+## Getting started
+@roles: all
+Add the app to your home screen so it opens like an app.
+
+- **Android:** browser menu, then Add to Home screen
+- **iPhone:** Share button, then Add to Home Screen
+
+### Permissions
+| Permission | Why it is needed |
+| --- | --- |
+| Location | Confirms you are at your office when you check in |
+| Camera | Takes the selfie saved with your check-in |
+
+If you blocked them by mistake: browser menu, Settings, Site settings, Location and Camera, allow this site.
+
+### Which version am I on
+The version is shown at the bottom of the login screen and in My Profile. If it looks old after an update, clear the saved copy: browser Settings, Site settings, All sites, this site, Clear and reset.
+
+## Checking in and out
+@roles: all
+1. Choose Office or WFH.
+2. Tap Check In and take a selfie.
+3. For Office, the app checks your location, then tap Confirm Check-In.
+
+Tap Check Out at the end of the day. The button shows Checking out while it saves. If your phone cannot give a location within 6 seconds, check-out is still saved without it.
+
+Your card shows live working hours while you are checked in, and the total once you check out. After checking out you can Check In Again the same day if you return.
+
+### If check-in is refused
+The screen shows the reason and a Location check panel with your position, GPS accuracy and your distance from each office.
+
+| Message | What to do |
+| --- | --- |
+| You are N m from the office | Move closer, or use WFH if you are working remotely |
+| Location is blocked | Allow Location for this site in your phone settings |
+| GPS appears to be off | Turn on Location in your phone quick settings |
+| Request timed out | Move near a window and try again |
+| No office is linked to your profile | Ask the admin to assign your office; use WFH meanwhile |
+| Your office link is broken | The office was removed or re-created; ask the admin to select it again |
+
+## Late coming and early leaving
+@roles: all
+Late means checking in more than the allowed minutes after your shift starts. Early leaving means checking out more than the allowed minutes before it ends. Both count together against one monthly limit. WFH days are not counted.
+
+The Late / early this month card on your home screen shows how many you have used. Tap it to see each one.
+
+Beyond your limit, each instance gets a Regularize button. Give a reason and it goes to your reporting manager. **Anything not regularized by month end becomes Loss of Pay.**
+
+## Leave
+@roles: all
+Open Leaves, choose the type, Full day or Half day, the dates and a reason, then Apply leave.
+
+- Only leave types where you have a balance are offered
+- Weekly offs and holidays inside your dates are not charged, so Friday to Monday costs 2 days
+- The screen tells you the cost before you apply
+- Pending applications hold the days until they are decided
+
+| Category | Leave basis |
+| --- | --- |
+| Employees | Yearly allowance, 1 April to 31 March, resets each April |
+| Articled assistants | Study leave only, 1 earned per completed month of articleship, builds up and never resets |
+
+Articled assistants: if no balance shows, your Articleship Start Date has not been entered. Ask HR.
+
+## Comp off
+@roles: all
+**Comp off is earned only with prior approval.** Working on a day off without approval earns nothing.
+
+1. Home, then Work on Holiday. Tick the days you need from the next 30 days, or Select all, write one reason and send.
+2. On an approved day, check in and check out as usual. WFH is allowed.
+3. The credit depends on hours worked that day.
+
+| Worked that day | Comp off earned |
+| --- | --- |
+| 75% or more of your shift | 1 day |
+| 40% to 75% | Half day |
+| Below 40% | None |
+
+Sessions in the same day are added together, and nothing is credited until you check out.
+
+Comp off **expires 90 days** after it is earned. The credit closest to expiry is always used first. To use it, apply for leave of type Comp Off.
+
+## Regularization
+@roles: all
+Use Regularize on the home screen for a day you forgot to check in or out, or where the times are wrong. Give the date, times and reason, and it goes to your manager.
+
+## My profile
+@roles: all
+You can change your name, mobile, blood group, emergency contact, home address, home location and password. You are logged out after changing your password.
+
+Team, weekly off, reporting manager, designation, holiday calendar and employee type are read-only. Ask HR to change them.
+
+## Approvals you handle
+@roles: manager,hod,hr
+Open My Team, or your dashboard, to reach these tabs.
+
+| Tab | What you do |
+| --- | --- |
+| Overview | Today's attendance at a glance |
+| Live | Where your team last shared location, and how long ago |
+| Records | Attendance by date and person, and corrections |
+| Leaves | Approve or reject leave |
+| Regularize | Approve missed attendance and late or early regularizations |
+| Comp Off | Approve work on days off, cancel approvals or credits, view balances |
+| Payroll | Monthly summary and CSV export |
+
+### Work on a day off
+Approve only where the work is genuinely needed, because an approval creates a comp off liability once the person works. Each day is decided separately. Under Approved you can see what was actually worked, cancel a future day, or cancel a credit already earned.
+
+### Late and early regularization
+Approving clears the instance. Approving more than the monthly limit places that person on the Exception list seen by HR and the HOD. Approval is never blocked, but it is visible.
+
+## Exceptions, rules and balances
+@roles: hod,hr
+| Tab | Purpose |
+| --- | --- |
+| Exceptions | Staff who crossed the monthly limit. Exception means regularizations beyond the limit. Open means not yet regularized and heading for Loss of Pay |
+| Late/Early rules | Limits and margins by office, team or individual |
+| Leave balances | Set anyone's leave or comp off balance as on a date |
+
+### How rule priority works
+The most specific setting wins: **individual, then team, then office, then firm default.** Leave a field blank in an override to inherit it. Use Check what applies to someone to confirm before relying on it. A change applies to the whole current month straight away.
+
+### Setting a balance as on a date
+Pick the person, the leave type, the balance and the as-on date. Leave on or before that date is treated as already included. After it, the app deducts leave applied and adds leave earned. Comp off set this way expires 90 days from the as-on date. Every entry is kept in History. Nobody can set their own balance, and an HOD can only set balances for their own teams.
+
+## Setting up staff
+@roles: hr
+Every field below matters. Missing ones cause problems later.
+
+| Field | Why it matters |
+| --- | --- |
+| Email and password | Their login |
+| Role | Staff, Manager, HOD or HR |
+| Employee type | Decides the leave basis |
+| Articleship start date | Articled only. Without it they earn no leave |
+| Team | Decides the shift. Without a team, late and early are never counted |
+| Reporting manager | Who receives their requests |
+| Offices | Without an office they cannot check in from office at all |
+| Weekly off | Their days off |
+| Holiday calendar | Which holidays apply, and their payroll working days |
+
+The staff list flags anyone with no office linked.
+
+## Offices and holiday calendars
+@roles: hr
+Add an office with the map picker, the GPS button or coordinates, and set the geofence radius.
+
+**To move an office always use Edit, never delete and re-create it.** A re-created office has a different identity, and everyone linked to the old one silently loses their office. The app warns you how many staff are linked before you delete.
+
+Holidays are kept in calendars, one per office or client location. Add each holiday to the calendar selected at the top. Each staff member follows one calendar, and their payroll working days are calculated from it.
+
+## Payroll and backups
+@roles: hr
+Payroll, choose the month, then Export to Excel. Working days are worked out per person from their weekly off and holiday calendar, so they differ between staff. Leave appears in days.
+
+**Check the Exceptions tab before processing payroll.** Anything still Open at month end is Loss of Pay.
+
+Backups hold settings only: staff, offices, teams, policies, holidays, rules and balances. Attendance and leave records are stored separately and are never touched by a restore. Backups run twice daily and before settings changes, and the newest 30 are kept. Take a manual backup before any bulk change.
+
+## What the app does not do
+@roles: all
+- **No background location tracking.** Location is read only while the app is open, and at check-in and check-out
+- **No WhatsApp or SMS alerts.** Notifications are inside the app only
+- **No face matching.** The selfie is recorded, not verified
+- **No salary calculation.** The app gives attendance and leave in days
+- **No automatic Loss of Pay deduction.** Open items are flagged and applied manually at payroll
+`;
+
+// Turns the manual text above into sections the app can show
+const parseHelp=(md)=>{
+  const out=[];
+  md.split(/\n## /).slice(1).forEach(chunk=>{
+    const lines=chunk.split("\n");
+    const title=lines.shift().trim();
+    let roles=["all"];
+    if(lines[0]&&lines[0].startsWith("@roles:")){ roles=lines.shift().replace("@roles:","").split(",").map(s=>s.trim()); }
+    out.push({title,roles,body:lines.join("\n").trim()});
+  });
+  return out;
+};
+const HELP_SECTIONS=parseHelp(HELP_MD);
+
+// Bold markers inside a line
+const HText=({t})=>(<>{String(t).split("**").map((p,i)=>i%2?<b key={i}>{p}</b>:<span key={i}>{p}</span>)}</>);
+
+// Renders one section's body: headings, bullets, tables, paragraphs
+const HBody=({md})=>{
+  const blocks=[]; const lines=md.split("\n");
+  for(let i=0;i<lines.length;i++){
+    const ln=lines[i];
+    if(!ln.trim())continue;
+    if(ln.startsWith("### ")){ blocks.push({t:"h",v:ln.slice(4)}); continue; }
+    if(ln.trim().startsWith("|")){
+      const rows=[]; while(i<lines.length&&lines[i].trim().startsWith("|")){ rows.push(lines[i]); i++; } i--;
+      const cells=r=>r.split("|").slice(1,-1).map(x=>x.trim());
+      const head=cells(rows[0]); const body=rows.slice(2).map(cells);
+      blocks.push({t:"table",head,body}); continue;
+    }
+    if(ln.trim().startsWith("- ")){
+      const items=[]; while(i<lines.length&&lines[i].trim().startsWith("- ")){ items.push(lines[i].trim().slice(2)); i++; } i--;
+      blocks.push({t:"ul",items}); continue;
+    }
+    if(/^\d+\.\s/.test(ln.trim())){
+      const items=[]; while(i<lines.length&&/^\d+\.\s/.test(lines[i].trim())){ items.push(lines[i].trim().replace(/^\d+\.\s/,"")); i++; } i--;
+      blocks.push({t:"ol",items}); continue;
+    }
+    blocks.push({t:"p",v:ln});
+  }
+  return (
+    <div>
+      {blocks.map((b,i)=>{
+        if(b.t==="h")return <div key={i} style={{fontWeight:800,fontSize:13,color:G.gold,margin:"12px 0 6px"}}><HText t={b.v}/></div>;
+        if(b.t==="p")return <p key={i} style={{fontSize:13,lineHeight:1.55,color:G.txt,margin:"0 0 8px"}}><HText t={b.v}/></p>;
+        if(b.t==="ul")return <ul key={i} style={{margin:"0 0 8px",paddingLeft:18}}>{b.items.map((x,j)=><li key={j} style={{fontSize:13,lineHeight:1.5,marginBottom:4}}><HText t={x}/></li>)}</ul>;
+        if(b.t==="ol")return <ol key={i} style={{margin:"0 0 8px",paddingLeft:18}}>{b.items.map((x,j)=><li key={j} style={{fontSize:13,lineHeight:1.5,marginBottom:4}}><HText t={x}/></li>)}</ol>;
+        return (
+          <div key={i} style={{overflowX:"auto",marginBottom:10,border:`1px solid ${G.bdr}`,borderRadius:10}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead><tr>{b.head.map((h,j)=><th key={j} style={{textAlign:"left",padding:"7px 9px",background:G.card2,color:G.mut,fontWeight:700,fontSize:11,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+              <tbody>{b.body.map((r,j)=>(<tr key={j}>{r.map((x,k)=><td key={k} style={{padding:"7px 9px",borderTop:`1px solid ${G.bdr}`,color:G.txt,verticalAlign:"top"}}><HText t={x}/></td>)}</tr>))}</tbody>
+            </table>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+function Help({user,setSc}) {
+  const role=user?.role||"staff";
+  const [open,setOpen]=useState(null);
+  const [q,setQ]=useState("");
+  // A senior role also sees everything the roles below it see
+  const can={admin:["all","hr","hod","manager"],hr:["all","hr","hod","manager"],
+    hod:["all","hod","manager"],branch_head:["all","hod","manager"],manager:["all","manager"],staff:["all"]}[role]||["all"];
+  const mine=HELP_SECTIONS.filter(s=>s.roles.some(r=>can.includes(r)));
+  const shown=q.trim()
+    ? mine.filter(s=>(s.title+" "+s.body).toLowerCase().includes(q.trim().toLowerCase()))
+    : mine;
+  const back=()=>setSc(["admin","hr"].includes(role)?"dash":"home");
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:20}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14}}>
+        <button onClick={back} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>Help & user manual</h2>
+      </div>
+      <div style={{...K,background:G.card2,padding:12}}>
+        <div style={{fontSize:12,color:G.mut}}>
+          Showing the sections for your role ({ROLE_LABELS[role]||role}). This manual is part of the app, so it always matches version {APP_VERSION}.
+        </div>
+      </div>
+      <input style={{...I,marginBottom:12}} value={q} onChange={e=>setQ(e.target.value)} placeholder="Search the manual…"/>
+      {shown.length===0&&<div style={{textAlign:"center",color:G.dim,padding:24,fontSize:13}}>Nothing found for "{q}".</div>}
+      {shown.map((s,i)=>{
+        const isOpen=open===s.title||!!q.trim();
+        return (
+          <div key={i} style={{...K,padding:0,overflow:"hidden"}}>
+            <button onClick={()=>setOpen(open===s.title?null:s.title)}
+              style={{width:"100%",textAlign:"left",background:"transparent",border:"none",padding:"14px 16px",cursor:"pointer",
+                display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"inherit"}}>
+              <span style={{fontWeight:800,fontSize:14,color:G.txt}}>{s.title}</span>
+              <span style={{color:G.mut,fontSize:13}}>{isOpen?"−":"+"}</span>
+            </button>
+            {isOpen&&<div style={{padding:"0 16px 14px"}}><HBody md={s.body}/></div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -720,6 +1038,7 @@ function LiveTimer({checkIn, checkOut}) {
 
 function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [outBusy,setOutBusy]=useState(false);
+  const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
   const tm=D.teams.find(t=>t.id===user.teamId);
@@ -732,27 +1051,10 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     setSelfie(img);
     if(wfh){setStep("confirm");return;}
     setStep("loc");
+    setLocWait({secs:0,acc:null});
     if(!navigator.geolocation){
-      setLocErr("GPS not supported on this device/browser.");
-      setStep("err");
-      return;
-    }
-
-    const startGpsFlow=()=>{
-      runGpsTiers();
-    };
-
-    if(navigator.permissions&&navigator.permissions.query){
-      navigator.permissions.query({name:"geolocation"}).then(result=>{
-        if(result.state==="denied"){
-          setLocErr("Location is blocked for this app. Please go to your phone Settings, then Apps, then Chrome (or your Browser), then Permissions, then Location, then Allow. Then try again.");
-          setStep("err");
-          return;
-        }
-        startGpsFlow();
-      }).catch(()=>startGpsFlow());
-    } else {
-      startGpsFlow();
+      setLocErr("This browser cannot provide location. Please use Chrome or Safari.");
+      setStep("err");return;
     }
 
     const evaluate=(la,lo,ac)=>{
@@ -766,44 +1068,57 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         setStep("err");return;
       }
       const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200)+ac);
-      if(near){
-        setOffice(near);setStep("confirm");
-      } else {
+      if(near){ setOffice(near);setStep("confirm"); }
+      else {
         const closest=assignedOffices.reduce((b,o)=>{const d=dist(la,lo,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed: ${closest?.radius||200}m). GPS accuracy: ±${Math.round(ac)}m. Try moving near a window/outside, or use WFH.`);
+        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed ${closest?.radius||200}m, GPS accuracy ±${Math.round(ac)}m). Move closer and try again, or use WFH if you are working remotely.`);
         setStep("err");
       }
     };
 
-    const onFinalErr=(e)=>{
-      const msgs={1:"Location permission denied. Please allow location access for this site in your phone or browser settings.",2:"Location/GPS appears to be turned OFF on your phone. Please turn on Location in your phone quick settings (swipe down from top) and try again.",3:"Location request timed out. Indoor GPS can be slow. Please try again or move near a window."};
-      setLocErr(msgs[e.code]||"Could not get location. Please try again.");
-      setStep("err");
+    // Keep listening for positions and take the first good one, rather than
+    // waiting for one long request to time out. Readings improve over time, so
+    // we also keep the best so far and use it if nothing better arrives.
+    const search=()=>{
+      let done=false,best=null,watchId=null,ticker=null,secs=0;
+      const GOOD=120, MAX_WAIT=28;
+      const stop=()=>{ if(watchId!==null)navigator.geolocation.clearWatch(watchId); if(ticker)clearInterval(ticker); };
+      const finishOk=(p)=>{ if(done)return; done=true; stop(); evaluate(p.lat,p.lng,p.ac); };
+      const finishErr=(code)=>{
+        if(done)return; done=true; stop();
+        const msgs={
+          1:"Location permission is blocked. Open your browser settings, then Site settings, then Location, and allow this site. Then try again.",
+          2:"Your phone could not provide a location. Check that Location is switched on in your quick settings, then try again.",
+          3:"Could not get a location fix. Step outside or near a window and try again — or use WFH if you are working remotely."};
+        setLocErr(msgs[code]||"Could not get your location. Please try again.");
+        setStep("err");
+      };
+      const take=(pos)=>{
+        const cand={lat:pos.coords.latitude,lng:pos.coords.longitude,ac:Math.round(pos.coords.accuracy||9999)};
+        if(!best||cand.ac<best.ac)best=cand;
+        setLocWait(w=>({secs:w.secs,acc:best.ac}));
+        if(cand.ac<=GOOD)finishOk(cand);
+      };
+      // a recent cached position gets us going immediately if there is one
+      navigator.geolocation.getCurrentPosition(take,()=>{},{enableHighAccuracy:false,timeout:4000,maximumAge:300000});
+      watchId=navigator.geolocation.watchPosition(take,
+        e=>{ if(e.code===1)finishErr(1); },
+        {enableHighAccuracy:true,maximumAge:0,timeout:MAX_WAIT*1000});
+      ticker=setInterval(()=>{
+        secs++; setLocWait({secs,acc:best?best.ac:null});
+        if(secs>=MAX_WAIT){ best?finishOk(best):finishErr(3); }
+      },1000);
     };
 
-    const runGpsTiers=()=>{
-      navigator.geolocation.getCurrentPosition(
-        pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
-        (e1)=>{
-          if(e1.code===1){onFinalErr(e1);return;}
-          navigator.geolocation.getCurrentPosition(
-            pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
-            (e2)=>{
-              if(e2.code===1){onFinalErr(e2);return;}
-              navigator.geolocation.getCurrentPosition(
-                pos=>evaluate(pos.coords.latitude,pos.coords.longitude,pos.coords.accuracy),
-                onFinalErr,
-                {enableHighAccuracy:false,timeout:15000,maximumAge:60000}
-              );
-            },
-            {enableHighAccuracy:true,timeout:25000,maximumAge:0}
-          );
-        },
-        {enableHighAccuracy:true,timeout:5000,maximumAge:60000}
-      );
-    };
-
-    startGpsFlow();
+    if(navigator.permissions&&navigator.permissions.query){
+      navigator.permissions.query({name:"geolocation"}).then(r=>{
+        if(r.state==="denied"){
+          setLocErr("Location is blocked for this app. Open your browser settings, then Site settings, then Location, allow this site, and try again.");
+          setStep("err");return;
+        }
+        search();
+      }).catch(search);
+    } else search();
   };
   const doIn=async()=>{
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
@@ -878,6 +1193,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       <div style={{background:`linear-gradient(135deg,${G.navy},${G.navyL})`,border:`1px solid ${G.gold}`,borderRadius:20,padding:22,marginBottom:14,textAlign:"center"}}>
         <div style={{fontSize:40,fontWeight:900,color:"#fff"}}>{now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</div>
         <div style={{color:"#c9d3ea",fontSize:13,marginTop:2}}>{now.toLocaleDateString([],{weekday:"long",day:"numeric",month:"long"})}</div>
+        {sh&&sh.shiftEnd<=sh.shiftStart&&<div style={{marginTop:8,background:"rgba(255,255,255,.18)",border:"1px solid #fff",borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:11,color:"#fff"}}>⚠ Shift timings look wrong — tell HR</div>}
         {sh&&<div style={{marginTop:8,background:"rgba(255,255,255,.14)",border:"1px solid rgba(255,255,255,.3)",borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:"#fff"}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
       <div style={K}>
@@ -893,7 +1209,16 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
               </>
             )}
             {step==="cam"&&<Cam onDone={onSelfie} onCancel={()=>setStep("idle")}/>}
-            {step==="loc"&&<div style={{textAlign:"center",padding:18}}><div style={{fontSize:34,marginBottom:8}}>📍</div><p style={{color:G.gold,fontWeight:700,marginBottom:4}}>Getting your location…</p><p style={{color:G.mut,fontSize:12,marginBottom:12}}>Please wait up to 20 seconds.</p><div style={{width:32,height:32,border:`4px solid ${G.gold}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto"}}/><p style={{color:G.dim,fontSize:11,marginTop:10}}>Enable location in phone settings if stuck</p></div>}
+            {step==="loc"&&(
+              <div style={{textAlign:"center",padding:18}}>
+                <div style={{width:34,height:34,border:`4px solid ${G.gold}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 12px"}}/>
+                <p style={{color:G.txt,fontWeight:700,margin:0}}>Finding your location…</p>
+                <p style={{color:G.mut,fontSize:12,marginTop:4}}>
+                  {locWait.acc?`Best reading so far ±${locWait.acc}m`:"Waiting for the first reading"} · {locWait.secs}s
+                </p>
+                <p style={{color:G.dim,fontSize:11,marginTop:6}}>Indoors this can take a few seconds. Near a window is faster.</p>
+              </div>
+            )}
             {step==="confirm"&&(
               <div style={{textAlign:"center"}}>
                 {selfie&&<img src={selfie} style={{width:90,height:90,borderRadius:"50%",objectFit:"cover",border:`4px solid ${G.gold}`,marginBottom:10}}/>}
@@ -914,6 +1239,9 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                     {list.length===0
                       ?<div style={{color:G.am}}>Offices linked to you: none</div>
                       :list.map(o=>(<div key={o.id}>{o.name}: {Math.round(dist(gps.lat,gps.lng,o.lat,o.lng))}m away · allowed {o.radius||200}m</div>))}
+                    <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${G.bdr}`,color:G.dim,fontSize:10,wordBreak:"break-all"}}>
+                      Show this to your admin — account: {user.id} · office codes on your profile: {(user.officeIds||[]).join(", ")||"(none)"} · offices in the system: {(D.offices||[]).length} · app v{APP_VERSION}
+                    </div>
                     <a href={`https://maps.google.com/?q=${gps.lat},${gps.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl,display:"inline-block",marginTop:4}}>Open my position in Google Maps</a>
                   </div>
                 );
@@ -953,7 +1281,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       </div>
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["Help & manual","help"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -1426,7 +1754,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu=isA||isHR
@@ -1447,6 +1775,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
         {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
+          <button onClick={()=>setSc("help")} title="Help" style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>❔</button>
           {isA&&<button onClick={()=>setSc("superadmin")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>⚙️</button>}
           <button onClick={logout} style={{...B(G.card),fontSize:12,padding:"8px 12px",border:`1px solid ${G.bdr}`}}>Logout</button>
         </div>
@@ -2098,20 +2427,42 @@ function LB({D,P,ST,AN,user,vu}) {
   const [uid,setUid]=useState(staff[0]?.id||"");
   const u=staff.find(x=>x.id===uid);
   const bal=u?leaveBalances(D,u):[];
-  const types=u?(u.employeeType==="articled"?[["sick","Sick"],["studyleave","Study"],["compoff","Comp Off"]]:[["casual","Casual"],["sick","Sick"],["compoff","Comp Off"]]):[];
+  const types=u?(u.employeeType==="articled"?[["leave","Study Leave"],["compoff","Comp Off"]]:[["casual","Casual"],["sick","Sick"],["compoff","Comp Off"]]):[];
   const [f,setF]=useState({type:"",days:"",asOn:tod(),note:""});
   const hist=(D.leaveOpenings||[]).filter(o=>o.userId===uid).sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""));
   const save=()=>{
     const t=f.type||types[0]?.[0];
     const v=parseFloat(f.days);
     if(!u)return ST("Choose a staff member","error");
-    if(isNaN(v)||v<0||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5","error");
+    if(isNaN(v)||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5 (a negative figure is allowed)","error");
     if(!f.asOn||f.asOn>tod())return ST("As-on date cannot be in the future","error");
     const rec={id:`lo_${u.id}_${t}_${f.asOn}`,userId:u.id,type:t,days:v,asOn:f.asOn,note:f.note.trim(),
       by:user.id,byName:user.name,on:new Date().toISOString()};
     P({...D,leaveOpenings:[...(D.leaveOpenings||[]).filter(o=>o.id!==rec.id),rec]});
     AN(u.id,`Your ${LEAVE_LABEL[t]} leave balance was set to ${v} day${v===1?"":"s"} as on ${fD(f.asOn)} by ${user.name}.`,"info");
     ST("Balance saved");setF({...f,days:"",note:""});
+  };
+  const exportLedger=()=>{
+    const head=["Staff","Employee type","Date of joining","Articleship start","Leave type","Date","Entry","Credit (days)","Debit (days)","Balance after","Note"];
+    const rows=[head];
+    staff.forEach(s=>{
+      LEAVE_TYPES.forEach(([t])=>{
+        const b=leaveBalances(D,s).find(x=>x.type===t);
+        if(!b)return;
+        const lg=t==="compoff"?leaveLedger(D,s,t):{rows:b.ledger||leaveLedger(D,s,t).rows};
+        (lg.rows||[]).forEach(r=>rows.push([s.name,s.employeeType==="articled"?"Articled":"Employee",s.doj||"",s.articleshipStart||"",
+          LEAVE_LABEL[t]||t,r.date,r.kind==="set"?`${r.label} (adjustment ${r.adjust>0?"+":""}${r.adjust})`:r.label,
+          r.inD||(r.kind==="set"&&r.adjust>0?r.adjust:"")||"",r.outD||(r.kind==="set"&&r.adjust<0?Math.abs(r.adjust):"")||"",
+          r.balance,r.note||""]));
+        rows.push([s.name,s.employeeType==="articled"?"Articled":"Employee",s.doj||"",s.articleshipStart||"",
+          LEAVE_LABEL[t]||t,tod(),"CLOSING BALANCE","","",b.left,""]);
+      });
+    });
+    const csv=rows.map(r=>r.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",")).join("\n");
+    const a=document.createElement("a");
+    a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
+    a.download=`Nucleus_Leave_Ledger_${tod()}.csv`;a.click();
+    ST("Ledger downloaded");
   };
   const del=o=>{if(!confirm(`Remove the ${LEAVE_LABEL[o.type]} balance set as on ${fD(o.asOn)}?`))return;
     P({...D,leaveOpenings:(D.leaveOpenings||[]).filter(x=>x.id!==o.id)});ST("Removed");};
@@ -2124,6 +2475,8 @@ function LB({D,P,ST,AN,user,vu}) {
           Employee balances still reset on 1 April. Comp off expires 90 days after it is earned or set.
         </div>
       </div>
+
+      <button onClick={exportLedger} style={{...B(G.bl),width:"100%",marginBottom:12,fontWeight:700}}>Download complete leave ledger (Excel)</button>
 
       <FRow label="Staff member">
         <select style={I} value={uid} onChange={e=>{setUid(e.target.value);setF({...f,type:""});}}>
@@ -2158,7 +2511,7 @@ function LB({D,P,ST,AN,user,vu}) {
                 {types.map(([t,lb])=><option key={t} value={t}>{lb}</option>)}
               </select>
             </FRow>
-            <FRow label="Balance (days)"><input type="number" step="0.5" min="0" style={I} value={f.days} onChange={e=>setF({...f,days:e.target.value})} placeholder="e.g. 7.5"/></FRow>
+            <FRow label="Balance (days)"><input type="number" step="0.5" style={I} value={f.days} onChange={e=>setF({...f,days:e.target.value})} placeholder="e.g. 7.5 or -2"/></FRow>
           </div>
           <div style={{display:"flex",gap:8}}>
             <FRow label="As on date"><input type="date" style={I} max={tod()} value={f.asOn} onChange={e=>setF({...f,asOn:e.target.value})}/></FRow>
@@ -2171,9 +2524,37 @@ function LB({D,P,ST,AN,user,vu}) {
           <button onClick={save} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save balance</button>
         </div>
 
+        <div style={K}>
+          <div style={{fontWeight:800,marginBottom:6}}>Ledger</div>
+          {bal.map(b=>{
+            const rows=(b.type==="compoff"?leaveLedger(D,u,b.type).rows:(b.ledger||[]));
+            if(!rows.length)return null;
+            return (
+              <div key={b.type} style={{marginBottom:10}}>
+                <div style={{fontSize:11,fontWeight:700,color:G.gold,textTransform:"uppercase",margin:"6px 0 4px"}}>{b.label}</div>
+                {rows.map((r,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,borderTop:`1px solid ${G.bdr}`,padding:"6px 0",fontSize:12}}>
+                    <div style={{minWidth:0}}>
+                      <div style={{color:G.txt}}>{fD(r.date)} · {r.label}</div>
+                      {(r.note||r.kind==="set")&&<div style={{fontSize:11,color:G.dim}}>{r.kind==="set"?`adjustment ${r.adjust>0?"+":""}${r.adjust}`:""}{r.note?(r.kind==="set"?" · ":"")+r.note:""}</div>}
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{color:r.outD?G.rd:G.gr,fontWeight:700}}>{r.outD?`−${r.outD}`:r.inD?`+${r.inD}`:r.kind==="set"?`=${r.setTo}`:""}</div>
+                      <div style={{fontSize:11,color:r.balance<0?G.rd:G.dim}}>bal {r.balance}</div>
+                    </div>
+                  </div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",borderTop:`2px solid ${G.bdr}`,paddingTop:6,fontSize:12,fontWeight:800}}>
+                  <span>Closing balance</span><span style={{color:b.left<0?G.rd:G.gr}}>{b.left}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
         {hist.length>0&&(
           <div style={K}>
-            <div style={{fontWeight:800,marginBottom:6}}>History</div>
+            <div style={{fontWeight:800,marginBottom:6}}>Balance corrections</div>
             {hist.map(o=>{
               const active=openingFor(D,uid,o.type)?.id===o.id;
               return(
@@ -2271,7 +2652,7 @@ function PT({D,vu,ST,user}) {
     const hd=ap.filter(l=>l.duration==="half"||l.type==="halfday").length;
     const cl=ap.filter(l=>l.type==="casual"||l.type==="halfday").reduce((x,l)=>x+dIn(l),0);
     const sl=ap.filter(l=>l.type==="sick").reduce((x,l)=>x+dIn(l),0);
-    const st=ap.filter(l=>l.type==="studyleave").reduce((x,l)=>x+dIn(l),0);
+    const st=ap.filter(l=>l.type==="studyleave"||l.type==="leave").reduce((x,l)=>x+dIn(l),0);
     const co=ap.filter(l=>l.type==="compoff").reduce((x,l)=>x+dIn(l),0);
     const tm=ar.reduce((x,r)=>x+wMin(r.checkIn,r.checkOut),0),am=days.length?Math.round(tm/days.length):0;
     const tp=days.filter(r=>!leaveOn.has(r.date)).length;
@@ -2303,7 +2684,7 @@ function PT({D,vu,ST,user}) {
           </div>
           <div style={{background:G.card2,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
-            {[["✅Pres",r.pr,G.gr],["⚠️Late",r.lt,G.am],["🏠WFH",r.wf,G.bl],["🌓Half",r.hd,G.pu],["🏖CL",r.cl,G.bl],["🤒SL",r.sl,G.rd],["🔄CO",r.co,G.mut],["❌Ab",r.ab,r.ab>3?G.rd:G.dim],["⏱Hrs",r.tH,G.gold]].map(([lb,v,c])=>(
+            {[["✅Pres",r.pr,G.gr],["⚠️Late",r.lt,G.am],["🏠WFH",r.wf,G.bl],["🌓Half",r.hd,G.pu],["🏖CL",r.cl,G.bl],["🤒SL",r.sl,G.rd],["📚Study",r.st,G.pu],["🔄CO",r.co,G.mut],["❌Ab",r.ab,r.ab>3?G.rd:G.dim],["⏱Hrs",r.tH,G.gold]].map(([lb,v,c])=>(
               <div key={lb} style={{background:G.card2,borderRadius:8,padding:"5px 6px",textAlign:"center"}}><div style={{fontSize:9,color:G.dim,fontWeight:700}}>{lb}</div><div style={{fontSize:13,fontWeight:900,color:c}}>{v}</div></div>
             ))}
           </div>
@@ -2322,7 +2703,7 @@ function PC({D,P,ST}) {
   const [etab,setEtab]=useState("employee");
   const pol=etab==="employee"?polEmp:polAA;
   const setPol=etab==="employee"?setPolEmp:setPolAA;
-  const tl=etab==="articled"?{sickPerMonth:"Sick Leave",studyleavePerMonth:"Study Leave"}:{casual:"Casual Leave",sick:"Sick Leave"};
+  const tl=etab==="articled"?{leavePerMonth:"Study Leave earned"}:{casual:"Casual Leave",sick:"Sick Leave"};
   const unit=etab==="articled"?"per month served":"per year (April – March)";
   const stp=etab==="articled"?0.5:1;
   const save=()=>{P({...D,leavePolicy:{employee:polEmp,articled:polAA}});ST("✅ Policy saved!");};
@@ -2336,7 +2717,7 @@ function PC({D,P,ST}) {
       </div>
       <div style={K}>
         <div style={{fontWeight:800,marginBottom:4,color:G.gold,fontSize:14}}>{etab==="employee"?"Employee":"Articled Assistant"} — {etab==="articled"?"Monthly Accrual":"Annual Allowances"}</div>
-        <div style={{fontSize:11,color:G.dim,marginBottom:12}}>{etab==="employee"?"Days per leave year (April – March). Resets every 1 April.":"Days earned for each completed month of articleship. Builds up over the whole tenure and never resets."}</div>
+        <div style={{fontSize:11,color:G.dim,marginBottom:12}}>{etab==="employee"?"Days per leave year (April – March). Resets every 1 April.":"Study leave earned for each completed month of articleship — normally 1 per month. It builds up over the whole tenure and never resets. Articled assistants have no separate sick leave."}</div>
         {Object.entries(tl).map(([t,lb])=>(
           <div key={t} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:`1px solid ${G.bdr}`}}>
             <div><div style={{fontWeight:700,fontSize:13}}>{lb}</div><div style={{fontSize:11,color:G.dim}}>{pol[t]||0} days {unit}</div></div>
@@ -2523,7 +2904,7 @@ function HC({D,P,ST}) {
 function SC({D,P,ST}) {
   const [sa,setSa]=useState(false);
   const [editU,setEditU]=useState(null);
-  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:DEFAULT_CAL,articleshipStart:"",mobile:""};
+  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:DEFAULT_CAL,articleshipStart:"",doj:"",mobile:""};
   const [f,setF]=useState(emptyF);
   const save=()=>{
     if(!f.name||!f.email)return ST("Name and email required","error");
@@ -2532,7 +2913,7 @@ function SC({D,P,ST}) {
     setSa(false);setEditU(null);setF(emptyF);
   };
   const startEdit=(u)=>{
-    setF({name:u.name,email:u.email,password:u.password||"",role:u.role,employeeType:u.employeeType||"employee",teamId:u.teamId||"",officeIds:u.officeIds||[],reportingTo:u.reportingTo||"",designation:u.designation||"",weeklyOff:u.weeklyOff||"sun_sat",calendarId:calIdOf(u),articleshipStart:u.articleshipStart||"",mobile:u.mobile||""});
+    setF({name:u.name,email:u.email,password:u.password||"",role:u.role,employeeType:u.employeeType||"employee",teamId:u.teamId||"",officeIds:u.officeIds||[],reportingTo:u.reportingTo||"",designation:u.designation||"",weeklyOff:u.weeklyOff||"sun_sat",calendarId:calIdOf(u),articleshipStart:u.articleshipStart||"",doj:u.doj||"",mobile:u.mobile||""});
     setEditU(u.id);setSa(true);window.scrollTo(0,0);
   };
   const roleColor={admin:G.rd,hr:G.pu,hod:G.bl,manager:G.navyL,staff:G.card2};
@@ -2560,6 +2941,10 @@ function SC({D,P,ST}) {
               <option value="employee">Employee</option>
               <option value="articled">Articled Assistant (CA)</option>
             </select>
+          </FRow>
+          <FRow label="Date of Joining">
+            <input type="date" style={I} value={f.doj||""} onChange={e=>setF({...f,doj:e.target.value})}/>
+            <div style={{fontSize:11,color:G.dim,marginTop:4}}>Used to pro-rate the first year's leave. Joining on or before the 15th earns that whole month.</div>
           </FRow>
           <FRow label="Designation"><input style={I} value={f.designation||""} onChange={e=>setF({...f,designation:e.target.value})} placeholder="e.g. Senior Associate"/></FRow>
           <FRow label="Mobile (for WhatsApp alerts)">
@@ -2651,6 +3036,12 @@ function TC({D,P,ST}) {
   const [f,setF]=useState(emptyTF);
   const save=()=>{
     if(!f.name)return ST("Name required","error");
+    if(!f.shiftStart||!f.shiftEnd)return ST("Shift start and end are required","error");
+    if(f.shiftEnd<=f.shiftStart)
+      return ST(`Shift end (${f.shiftEnd}) must be later than shift start (${f.shiftStart}). Overnight shifts are not supported.`,"error");
+    // An end time earlier than the start usually means a typo. Overnight shifts
+    // are real, so ask rather than block.
+    if(f.shiftEnd<=f.shiftStart&&!confirm(`Shift is ${f.shiftStart} to ${f.shiftEnd}, which ends before it starts.\n\nThis is correct only for a night shift. Late coming and early leaving are measured from these times, so a wrong value affects attendance for the whole team.\n\nSave anyway?`))return;
     if(editT){P({...D,teams:D.teams.map(t=>t.id===editT?{...t,...f}:t)});ST("✅ Updated!");}
     else{P({...D,teams:[...D.teams,{...f,id:gid()}]});ST("✅ Created!");}
     setSa(false);setEditT(null);setF(emptyTF);
@@ -2679,7 +3070,7 @@ function TC({D,P,ST}) {
       </div>)}
       {D.teams.map(t=>(
         <div key={t.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:G.mut}}>🕘 {t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members{t.hodId&&` · HOD: ${(D.users||[]).find(u=>u.id===t.hodId)?.name||"—"}`}</div></div>
+          <div><div style={{fontWeight:700}}>{t.name}</div><div style={{fontSize:12,color:t.shiftEnd<=t.shiftStart?G.am:G.mut}}>{t.shiftEnd<=t.shiftStart?"⚠ ":"🕘 "}{t.shiftStart}–{t.shiftEnd} · {D.users.filter(u=>u.teamId===t.id).length} members{t.hodId&&` · HOD: ${(D.users||[]).find(u=>u.id===t.hodId)?.name||"—"}`}</div></div>
           {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
             <button onClick={()=>{setF({name:t.name,shiftStart:t.shiftStart,shiftEnd:t.shiftEnd,hodId:t.hodId||""});setEditT(t.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
@@ -2945,6 +3336,7 @@ function Profile({user,D,P,ST,setSc,logout}) {
           ["Reporting To", D.users?.find(u=>u.id===user.reportingTo)?.name||"—"],
           ["Designation", user.designation||"—"],
           ["Employee Type", user.employeeType==="articled"?"Articled Assistant (CA)":"Employee"],
+          ["Date of Joining", user.doj?fD(user.doj):"—"],
           ["App version", APP_VERSION],
         ].map(([lb,v])=>(
           <div key={lb} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:`1px solid ${G.bdr}`}}>
