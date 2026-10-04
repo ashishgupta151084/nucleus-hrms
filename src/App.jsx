@@ -203,7 +203,7 @@ const monthsServed=(start,today)=>{
 };
 // Latest "balance as on date" set by HR / HOD for one person and leave type
 const openingFor=(D,uid,t)=>(D.leaveOpenings||[])
-  .filter(o=>o.userId===uid&&o.type===t&&o.asOn<=tod())
+  .filter(o=>o.userId===uid&&o.type===t&&o.kind!=='taken'&&o.asOn<=tod())
   .sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""))[0]||null;
 // Months added to a date, keeping the day where possible
 const addMonths=(ds,n)=>{
@@ -224,6 +224,14 @@ const empEntitlement=(annual,doj,ys,ye)=>{
 };
 // Every movement for one person and one leave type, oldest first, with a running
 // balance. Used by the balance tiles, the staff ledger view and the Excel export.
+const daysBetween=(a,b)=>Math.round((new Date(b+"T12:00:00")-new Date(a+"T12:00:00"))/86400000);
+// What HR recorded as already taken up to a date (the latest entry wins)
+const takenEntry=(D,uid,types)=>(D.leaveOpenings||[])
+  .filter(o=>o.userId===uid&&types.includes(o.type)&&o.kind!=="balance"&&o.asOn<=tod())
+  .sort((a,b)=>b.asOn.localeCompare(a.asOn)||(b.on||"").localeCompare(a.on||""))[0]||null;
+// Every movement for one person and one leave type, oldest first, with a running
+// balance. Leave balance is always entitlement earned minus leave taken — it is
+// never set directly. Comp off is the exception and is maintained by hand.
 const leaveLedger=(D,user,type)=>{
   const isAA=user?.employeeType==="articled";
   const pol=(D.leavePolicy||DP)[isAA?"articled":"employee"]||(isAA?DP_AA:DP_EMP);
@@ -239,29 +247,38 @@ const leaveLedger=(D,user,type)=>{
   } else if(isAA){
     const rate=Number(pol.leavePerMonth??DP_AA.leavePerMonth)||0;
     const start=user?.articleshipStart||null;
+    const te=takenEntry(D,user.id,AA_LEAVE_TYPES);
     if(start){
       const n=monthsServed(start,tod());
-      for(let i=1;i<=n;i++){const d=addMonths(start,i);rows.push({date:d,kind:"accrual",label:`Month ${i} completed`,inD:rate});}
+      for(let i=1;i<=n;i++)rows.push({date:addMonths(start,i),kind:"accrual",label:`Month ${i} completed`,inD:rate});
+      // half a month beyond the last completed month earns half the leave
+      const anniv=addMonths(start,n);
+      if(daysBetween(anniv,tod())>=15)
+        rows.push({date:addDays(anniv,15),kind:"accrual",label:"Half month completed",inD:Math.round(rate*0.5*10)/10});
     }
-    (D.leaveOpenings||[]).filter(o=>o.userId===user.id&&AA_LEAVE_TYPES.includes(o.type)&&o.asOn<=tod())
-      .forEach(o=>rows.push({date:o.asOn,kind:"set",label:"Balance set by "+(o.byName||"HR"),setTo:Number(o.days)||0,note:o.note||""}));
-    (D.leaves||[]).filter(l=>l.userId===user.id&&AA_LEAVE_TYPES.includes(l.type)&&(l.status==="approved"||l.status==="pending")&&(!start||l.from>=start))
+    if(te&&Number(te.taken))rows.push({date:te.asOn,kind:"taken",
+      label:`Leave taken up to ${fD(te.asOn)} (entered by ${te.byName||"HR"})`,outD:Number(te.taken),note:te.note||""});
+    (D.leaves||[]).filter(l=>l.userId===user.id&&AA_LEAVE_TYPES.includes(l.type)&&(l.status==="approved"||l.status==="pending")
+        &&(!start||l.from>=start)&&(!te||l.from>te.asOn))
       .forEach(l=>rows.push({date:l.from,kind:"leave",label:`Study leave${(l.duration==="half")?" (half day)":""}`,
         outD:leaveDays(l,D,user),note:l.status==="pending"?"pending approval":(l.reason||"")}));
   } else {
     const annual=Number(pol[type])||0;
+    const te=takenEntry(D,user.id,[type,...(type==="casual"?["halfday"]:[])]);
     if(annual>0){
       const ent=empEntitlement(annual,user?.doj,ys,ye);
       rows.push({date:(user?.doj&&user.doj>ys)?user.doj:ys,kind:"accrual",
         label:(user?.doj&&user.doj>ys)?`Entitlement on joining (${ent} of ${annual})`:"Yearly entitlement",inD:ent});
     }
-    (D.leaveOpenings||[]).filter(o=>o.userId===user.id&&o.type===type&&o.asOn<=tod()&&o.asOn>=ys&&o.asOn<ye)
-      .forEach(o=>rows.push({date:o.asOn,kind:"set",label:"Balance set by "+(o.byName||"HR"),setTo:Number(o.days)||0,note:o.note||""}));
-    (D.leaves||[]).filter(l=>l.userId===user.id&&(l.type===type||(type==="casual"&&l.type==="halfday"))&&(l.status==="approved"||l.status==="pending")&&l.from>=ys&&l.from<ye)
+    if(te&&Number(te.taken)&&te.asOn>=ys&&te.asOn<ye)rows.push({date:te.asOn,kind:"taken",
+      label:`Leave taken up to ${fD(te.asOn)} (entered by ${te.byName||"HR"})`,outD:Number(te.taken),note:te.note||""});
+    (D.leaves||[]).filter(l=>l.userId===user.id&&(l.type===type||(type==="casual"&&l.type==="halfday"))
+        &&(l.status==="approved"||l.status==="pending")&&l.from>=ys&&l.from<ye
+        &&(!te||te.asOn<ys||l.from>te.asOn))
       .forEach(l=>rows.push({date:l.from,kind:"leave",label:`${LEAVE_LABEL[type]} leave${(l.duration==="half"||l.type==="halfday")?" (half day)":""}`,
         outD:leaveDays(l,D,user,ys,ye),note:l.status==="pending"?"pending approval":(l.reason||"")}));
   }
-  const order={accrual:0,earned:0,set:1,leave:2};
+  const order={accrual:0,earned:0,set:1,taken:1,leave:2};
   rows.sort((a,b)=>a.date.localeCompare(b.date)||(order[a.kind]-order[b.kind]));
   let bal=0;
   rows.forEach(r=>{
@@ -283,11 +300,10 @@ const leaveBalances=(D,user)=>{
     const annual=isAA?0:(Number(pol[t])||0);
     if(isAA?rate<=0:annual<=0)return;
     const lg=leaveLedger(D,user,t);
-    const op=isAA?(D.leaveOpenings||[]).filter(o=>o.userId===user.id&&AA_LEAVE_TYPES.includes(o.type)&&o.asOn<=tod()).sort((a,b)=>b.asOn.localeCompare(a.asOn))[0]||null:openingFor(D,user.id,t);
-    const accr=(from)=>lg.rows.filter(r=>r.kind==="accrual"&&(!from||r.date>from)).reduce((s,r)=>s+(r.inD||0),0);
-    const total=op?Math.round((Number(op.days)+accr(op.asOn))*10)/10:accr(null);
-    const used=lg.rows.filter(r=>r.kind==="leave"&&(!op||r.date>op.asOn)).reduce((s,r)=>s+(r.outD||0),0);
-    out.push({type:t,label,total,used,left:lg.balance,opening:op||null,ledger:lg.rows,
+    const te=takenEntry(D,user.id,isAA?AA_LEAVE_TYPES:[t,...(t==="casual"?["halfday"]:[])]);
+    const total=lg.rows.filter(r=>r.kind==="accrual").reduce((s,r)=>s+(r.inD||0),0);
+    const used=lg.rows.filter(r=>r.kind==="leave"||r.kind==="taken").reduce((s,r)=>s+(r.outD||0),0);
+    out.push({type:t,label,total:Math.round(total*10)/10,used:Math.round(used*10)/10,left:lg.balance,taken:te,opening:null,ledger:lg.rows,
       accrual:isAA?{rate,months:monthsServed(user?.articleshipStart||null,tod()),start:user?.articleshipStart||null}:null});
   });
   return out;
@@ -2434,28 +2450,35 @@ function LB({D,P,ST,AN,user,vu}) {
     const t=f.type||types[0]?.[0];
     const v=parseFloat(f.days);
     if(!u)return ST("Choose a staff member","error");
-    if(isNaN(v)||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5 (a negative figure is allowed)","error");
-    if(!f.asOn||f.asOn>tod())return ST("As-on date cannot be in the future","error");
-    const rec={id:`lo_${u.id}_${t}_${f.asOn}`,userId:u.id,type:t,days:v,asOn:f.asOn,note:f.note.trim(),
-      by:user.id,byName:user.name,on:new Date().toISOString()};
+    if(isNaN(v)||Math.round(v*2)!==v*2)return ST("Enter days in steps of 0.5","error");
+    if(t!=="compoff"&&v<0)return ST("Leave taken cannot be negative","error");
+    if(!f.asOn||f.asOn>tod())return ST("Date cannot be in the future","error");
+    const isCO=t==="compoff";
+    const rec=isCO
+      ?{id:`lo_${u.id}_${t}_${f.asOn}`,userId:u.id,type:t,kind:"balance",days:v,asOn:f.asOn,note:f.note.trim(),
+        by:user.id,byName:user.name,on:new Date().toISOString()}
+      :{id:`lo_${u.id}_${t}_${f.asOn}`,userId:u.id,type:t,kind:"taken",taken:v,asOn:f.asOn,note:f.note.trim(),
+        by:user.id,byName:user.name,on:new Date().toISOString()};
     P({...D,leaveOpenings:[...(D.leaveOpenings||[]).filter(o=>o.id!==rec.id),rec]});
-    AN(u.id,`Your ${LEAVE_LABEL[t]} leave balance was set to ${v} day${v===1?"":"s"} as on ${fD(f.asOn)} by ${user.name}.`,"info");
-    ST("Balance saved");setF({...f,days:"",note:""});
+    AN(u.id,isCO
+      ?`Your comp off balance was set to ${v} day${v===1?"":"s"} as on ${fD(f.asOn)} by ${user.name}.`
+      :`${LEAVE_LABEL[t]} taken up to ${fD(f.asOn)} was recorded as ${v} day${v===1?"":"s"} by ${user.name}. Your balance has been updated.`,"info");
+    ST("Saved");setF({...f,days:"",note:""});
   };
   const exportLedger=()=>{
     const head=["Staff","Employee type","Date of joining","Articleship start","Leave type","Date","Entry","Credit (days)","Debit (days)","Balance after","Note"];
     const rows=[head];
     staff.forEach(s=>{
       LEAVE_TYPES.forEach(([t])=>{
-        const b=leaveBalances(D,s).find(x=>x.type===t);
-        if(!b)return;
-        const lg=t==="compoff"?leaveLedger(D,s,t):{rows:b.ledger||leaveLedger(D,s,t).rows};
+        const bb=leaveBalances(D,s).find(x=>x.type===t);
+        if(!bb)return;
+        const lg=leaveLedger(D,s,t);
         (lg.rows||[]).forEach(r=>rows.push([s.name,s.employeeType==="articled"?"Articled":"Employee",s.doj||"",s.articleshipStart||"",
           LEAVE_LABEL[t]||t,r.date,r.kind==="set"?`${r.label} (adjustment ${r.adjust>0?"+":""}${r.adjust})`:r.label,
           r.inD||(r.kind==="set"&&r.adjust>0?r.adjust:"")||"",r.outD||(r.kind==="set"&&r.adjust<0?Math.abs(r.adjust):"")||"",
           r.balance,r.note||""]));
         rows.push([s.name,s.employeeType==="articled"?"Articled":"Employee",s.doj||"",s.articleshipStart||"",
-          LEAVE_LABEL[t]||t,tod(),"CLOSING BALANCE","","",b.left,""]);
+          LEAVE_LABEL[t]||t,tod(),"CLOSING BALANCE","","",bb.left,""]);
       });
     });
     const csv=rows.map(r=>r.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",")).join("\n");
@@ -2471,7 +2494,7 @@ function LB({D,P,ST,AN,user,vu}) {
       <div style={{...K,background:G.card2}}>
         <div style={{color:G.gold,fontWeight:700,fontSize:13}}>Leave balances as on date</div>
         <div style={{color:G.dim,fontSize:12,marginTop:3}}>
-          Enter each person's balance as on a date (e.g. when you start using this app). From the next day, the app deducts leave applied and, for articled assistants, adds leave earned each month.
+          Leave balances are calculated from the date of joining: entitlement earned minus leave taken. Record how much leave each person had already taken when you started using the app, and the rest is automatic. Comp off is the only balance set by hand.
           Employee balances still reset on 1 April. Comp off expires 90 days after it is earned or set.
         </div>
       </div>
@@ -2493,7 +2516,7 @@ function LB({D,P,ST,AN,user,vu}) {
                 <div style={{fontSize:10,color:G.mut,fontWeight:700,textTransform:"uppercase"}}>{b.label}</div>
                 <div style={{fontSize:20,fontWeight:900,color:b.left>0?G.txt:G.rd}}>{b.left}</div>
                 <div style={{fontSize:10,color:G.dim}}>
-                  {b.opening?`${b.opening.days} as on ${fD(b.opening.asOn)}`:b.accrual?`${b.accrual.rate}/mo × ${b.accrual.months} mo`:b.total===null?"earned":`of ${b.total} this year`}
+                  {b.taken?`${b.taken.taken} taken up to ${fD(b.taken.asOn)}`:b.opening?`${b.opening.days} as on ${fD(b.opening.asOn)}`:b.accrual?`${b.accrual.rate}/mo × ${b.accrual.months} mo`:b.total===null?"earned":`of ${b.total} this year`}
                   {b.opening&&b.accrual?.months?` + ${b.accrual.months*b.accrual.rate} earned`:""}
                   {b.used?` − ${b.used} used`:""}
                 </div>
@@ -2504,24 +2527,25 @@ function LB({D,P,ST,AN,user,vu}) {
         </div>
 
         <div style={K}>
-          <div style={{fontWeight:800,marginBottom:8}}>Set balance</div>
+          <div style={{fontWeight:800,marginBottom:8}}>{(f.type||types[0]?.[0])==="compoff"?"Set comp off balance":"Record leave already taken"}</div>
           <div style={{display:"flex",gap:8}}>
             <FRow label="Leave type">
               <select style={I} value={f.type||types[0]?.[0]||""} onChange={e=>setF({...f,type:e.target.value})}>
                 {types.map(([t,lb])=><option key={t} value={t}>{lb}</option>)}
               </select>
             </FRow>
-            <FRow label="Balance (days)"><input type="number" step="0.5" style={I} value={f.days} onChange={e=>setF({...f,days:e.target.value})} placeholder="e.g. 7.5 or -2"/></FRow>
+            <FRow label={(f.type||types[0]?.[0])==="compoff"?"Balance (days)":"Leave taken (days)"}><input type="number" step="0.5" style={I} value={f.days} onChange={e=>setF({...f,days:e.target.value})} placeholder="e.g. 3.5"/></FRow>
           </div>
           <div style={{display:"flex",gap:8}}>
-            <FRow label="As on date"><input type="date" style={I} max={tod()} value={f.asOn} onChange={e=>setF({...f,asOn:e.target.value})}/></FRow>
+            <FRow label={(f.type||types[0]?.[0])==="compoff"?"As on date":"Taken up to date"}><input type="date" style={I} max={tod()} value={f.asOn} onChange={e=>setF({...f,asOn:e.target.value})}/></FRow>
             <FRow label="Note (optional)"><input style={I} value={f.note} onChange={e=>setF({...f,note:e.target.value})} placeholder="e.g. from old register"/></FRow>
           </div>
           <div style={{fontSize:11,color:G.dim,marginBottom:8}}>
-            Leave on or before the as-on date is treated as already included in this figure.
-            {(f.type||types[0]?.[0])==="compoff"&&" Comp off set here expires 90 days after the as-on date; comp off earned later is added on top."}
+            {(f.type||types[0]?.[0])==="compoff"
+              ? "Comp off is maintained by hand. The figure you enter becomes the balance on that date and expires 90 days later; comp off earned afterwards is added on top."
+              : "Leave balance is always worked out as entitlement earned minus leave taken — it is never set directly. Enter how many days this person had already taken up to the date below, and the app counts everything applied in the app after that."}
           </div>
-          <button onClick={save} style={{...B(G.gold),width:"100%",fontWeight:800}}>Save balance</button>
+          <button onClick={save} style={{...B(G.gold),width:"100%",fontWeight:800}}>{(f.type||types[0]?.[0])==="compoff"?"Save balance":"Save leave taken"}</button>
         </div>
 
         <div style={K}>
@@ -2554,13 +2578,13 @@ function LB({D,P,ST,AN,user,vu}) {
 
         {hist.length>0&&(
           <div style={K}>
-            <div style={{fontWeight:800,marginBottom:6}}>Balance corrections</div>
+            <div style={{fontWeight:800,marginBottom:6}}>Entries by HR</div>
             {hist.map(o=>{
-              const active=openingFor(D,uid,o.type)?.id===o.id;
+              const active=(o.kind==="balance"?openingFor(D,uid,o.type):takenEntry(D,uid,[o.type]))?.id===o.id;
               return(
                 <div key={o.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${G.bdr}`,padding:"8px 0"}}>
                   <div>
-                    <div style={{fontSize:13,fontWeight:700}}>{LEAVE_LABEL[o.type]}: {o.days} as on {fD(o.asOn)} {active&&<span style={{fontSize:10,color:G.gr}}>● in use</span>}</div>
+                    <div style={{fontSize:13,fontWeight:700}}>{LEAVE_LABEL[o.type]}: {o.kind==="balance"?`${o.days} balance as on`:`${o.taken} taken up to`} {fD(o.asOn)} {active&&<span style={{fontSize:10,color:G.gr}}>● in use</span>}</div>
                     <div style={{fontSize:11,color:G.mut}}>by {o.byName||"—"}{o.note?` · ${o.note}`:""}</div>
                   </div>
                   <button onClick={()=>del(o)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"4px 8px"}}>Remove</button>
