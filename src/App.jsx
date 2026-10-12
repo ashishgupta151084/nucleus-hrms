@@ -8,7 +8,8 @@ import {
   addNotification, updateNotification, onNotifications,
   saveBackup, getBackups, getOlderBackups, restoreBackup,
   addWorkApproval, updateWorkApproval, onWorkApprovals,
-  addCompOff, updateCompOff, onCompOffs
+  addCompOff, updateCompOff, onCompOffs,
+  addOD, updateOD, onODs
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
@@ -288,6 +289,36 @@ const leaveLedger=(D,user,type)=>{
   });
   return {rows,balance:bal};
 };
+// ── On Duty (OD) ──────────────────────────────────────────────────
+// Staff is sent somewhere that is not an office but is on duty. The manager
+// approves it in advance. No check-in or check-out is required, but the
+// location must be shared at least once on each OD day — that ping is the
+// evidence the day was worked, and it is what the attendance record holds.
+const odEnd=o=>o.to||o.from;
+const odDates=o=>{const out=[];let d=o.from;const e=odEnd(o);while(d<=e&&out.length<400){out.push(d);d=addDays(d,1);}return out;};
+// The approved OD covering one date for one person, if any
+const odOn=(D,uid,ds)=>(D.ods||[]).find(o=>o.userId===uid&&o.status==="approved"&&ds>=o.from&&ds<=odEnd(o));
+// The OD attendance record for a date, with its ping count
+const odRecOn=(D,uid,ds)=>{
+  const r=(D.attendance||[]).find(a=>a.userId===uid&&a.date===ds&&a.isOD);
+  if(!r)return null;
+  const pings=(r.odPings||[]);
+  return {rec:r,pings:pings.length||(r.gps?1:0),last:pings.length?pings[pings.length-1].ts:r.checkIn};
+};
+// Approved OD working days up to today on which nothing was ever shared.
+// These are flagged, not silently paid: the staff regularizes them as usual.
+const odMissing=(D,u,month)=>{
+  const hols=holsFor(D,u), wo=u?.weeklyOff||"sun_sat", today=tod(), out=[];
+  (D.ods||[]).filter(o=>o.userId===u.id&&o.status==="approved").forEach(o=>{
+    odDates(o).forEach(ds=>{
+      if(month&&!ds.startsWith(month))return;
+      if(ds>today||isDayOff(ds,hols,wo))return;
+      if(odRecOn(D,u.id,ds))return;
+      out.push({date:ds,place:o.place||"",od:o});
+    });
+  });
+  return out.sort((a,b)=>a.date.localeCompare(b.date));
+};
 // Every day of a month for one person: what kind of day it was, what was
 // recorded, and why. Used by the day-wise view and the detailed export.
 const dayWise=(D,u,yr,mo)=>{
@@ -305,10 +336,15 @@ const dayWise=(D,u,yr,mo)=>{
     const lv=(D.leaves||[]).find(l=>l.userId===u.id&&(l.status==="approved"||l.status==="pending")&&
       ds>=l.from&&ds<=((l.duration==="half"||l.type==="halfday")?l.from:(l.to||l.from)));
     const wa=(D.workApprovals||[]).find(w=>w.userId===u.id&&w.date===ds&&w.status==="approved"&&!w.creditCancelled);
-    const lateM=first&&sh&&!first.isWFH?lateBy(first.checkIn,sh.shiftStart):0;
-    const earlyM=lastOut&&sh&&!first?.isWFH?minsBeforeEnd(lastOut.checkOut,sh.shiftEnd):0;
+    const odA=odOn(D,u.id,ds);                                  // approved OD covering this date
+    const odR=recs.find(r=>r.isOD)||null;                       // the OD record, if location was shared
+    const isODday=!!odR;
+    const lateM=first&&sh&&!first.isWFH&&!first.isOD?lateBy(first.checkIn,sh.shiftStart):0;
+    const earlyM=lastOut&&sh&&!first?.isWFH&&!first?.isOD?minsBeforeEnd(lastOut.checkOut,sh.shiftEnd):0;
     let status;
-    if(recs.length) status=first.isWFH||first.status==="wfh"?"WFH":lateM>rule.lateMins?"Late":"Present";
+    if(isODday) status=`OD${odR.odPlace?` — ${odR.odPlace}`:""}`;
+    else if(recs.length) status=first.isWFH||first.status==="wfh"?"WFH":lateM>rule.lateMins?"Late":"Present";
+    else if(odA&&!off&&ds<=today) status="OD — location not shared";
     else if(lv) status=`${LEAVE_LABEL[lv.type]||lv.type} leave${(lv.duration==="half"||lv.type==="halfday")?" (half)":""}${lv.status==="pending"?" — pending":""}`;
     else if(hol) status=hol.name;
     else if(off) status="Weekly off";
@@ -318,17 +354,25 @@ const dayWise=(D,u,yr,mo)=>{
       day:new Date(ds+"T12:00:00").toLocaleDateString([],{weekday:"short"}),
       dayType:hol?`Holiday — ${hol.name}`:off?"Weekly off":"Working day",
       status,
-      inT:first?fT(first.checkIn):"",
-      outT:lastOut?fT(lastOut.checkOut):(first?"not checked out":""),
-      hours:mins?`${Math.floor(mins/60)}h ${mins%60}m`:"",
+      inT:isODday?fT(odR.checkIn):first?fT(first.checkIn):"",
+      outT:isODday?((odR.odPings||[]).length>1?fT(odR.odPings[odR.odPings.length-1].ts):"")
+        :lastOut?fT(lastOut.checkOut):(first?"not checked out":""),
+      hours:isODday?"":mins?`${Math.floor(mins/60)}h ${mins%60}m`:"",
       lateM:lateM>rule.lateMins?lateM:0,
       earlyM:earlyM>rule.earlyMins?earlyM:0,
-      office:first?(first.officeName||""):"",
-      mode:first?(first.isWFH||first.status==="wfh"?"WFH":"Office"):"",
+      office:isODday?(odR.odPlace||"OD"):first?(first.officeName||""):"",
+      mode:isODday?"OD":first?(first.isWFH||first.status==="wfh"?"WFH":"Office"):"",
       sessions:recs.length,
       regularized:!!(first&&(first.lateReg||first.earlyReg||first.lateApproved)),
       compOffDay:!!wa,
-      note:[wa?"approved to work on day off":"",first&&!lastOut?"missing check-out":"",
+      odDay:isODday||!!(odA&&!off&&ds<=today),
+      odPings:isODday?((odR.odPings||[]).length||1):0,
+      note:[wa?"approved to work on day off":"",
+        isODday?`on duty — location shared ${(odR.odPings||[]).length||1}×`:"",
+        odA&&!isODday&&!off&&ds<=today?"OD approved but location never shared — needs regularization":"",
+        first&&!lastOut&&!isODday?"missing check-out":"",
+        first?.outOffOffice?"checked out away from office":"",
+        first?.outOfficeChanged?`checked out at a different office (${first.checkOutOfficeName||"?"})`:"",
         recs.length>1?`${recs.length} check-ins`:"",lv&&recs.length?"leave + attendance":""].filter(Boolean).join("; ")};
   });
 };
@@ -508,7 +552,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-09-23";
+const APP_VERSION="2026-10-07";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -618,7 +662,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],workApprovals:[],compoffs:[],liveLocations:{},notifications:[],loaded:false});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],workApprovals:[],compoffs:[],ods:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -652,6 +696,7 @@ export default function App() {
   useEffect(()=>{const u=onRegs(r=>setD(p=>({...p,regularizations:r})));return u;},[]);
   useEffect(()=>{const u=onWorkApprovals(r=>setD(p=>({...p,workApprovals:r})));return u;},[]);
   useEffect(()=>{const u=onCompOffs(r=>setD(p=>({...p,compoffs:r})));return u;},[]);
+  useEffect(()=>{const u=onODs(r=>setD(p=>({...p,ods:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
   useEffect(()=>{
     if(!cu)return;
@@ -756,6 +801,7 @@ export default function App() {
       {sc==="reg"&&<Reg {...props}/>}
       {sc==="profile"&&<Profile {...props} logout={logout}/>}
       {sc==="workreq"&&<WorkReq {...props}/>}
+      {sc==="odreq"&&<ODReq {...props}/>}
       {sc==="help"&&<Help {...props}/>}
       {sc==="lateapproval"&&<LateApproval {...props}/>}
       {sc==="changepwd"&&<ChangePwd {...props}/>}
@@ -800,9 +846,20 @@ The version is shown at the bottom of the login screen and in My Profile. If it 
 2. Tap Check In and take a selfie.
 3. For Office, the app checks your location, then tap Confirm Check-In.
 
-Tap Check Out at the end of the day. The button shows Checking out while it saves. If your phone cannot give a location within 6 seconds, check-out is still saved without it.
+Tap Check Out at the end of the day. The button shows Checking out while it saves.
 
 Your card shows live working hours while you are checked in, and the total once you check out. After checking out you can Check In Again the same day if you return.
+
+### Where you may check out from
+
+| Where you are | What happens |
+| --- | --- |
+| The same office you checked in at | Normal check-out |
+| A different office that is assigned to you | Saved, but flagged — raise a regularization so your manager can approve it. Your manager is told |
+| Anywhere that is not one of your offices | **Check-out is refused.** If you have already left, use Regularize to record your check-out time |
+| Your phone cannot give a location in 6 seconds | Saved and marked *location unverified*, so you are never stuck |
+
+WFH days have no location rule on check-out.
 
 ### If check-in is refused
 The screen shows the reason and a Location check panel with your position, GPS accuracy and your distance from each office.
@@ -858,9 +915,25 @@ Sessions in the same day are added together, and nothing is credited until you c
 
 Comp off **expires 90 days** after it is earned. The credit closest to expiry is always used first. To use it, apply for leave of type Comp Off.
 
+## On duty (OD)
+@roles: all
+OD is for a day you are sent to work somewhere that is **not** one of the firm's offices — a client site, a bank, a department, a court.
+
+1. Home, then **On Duty (OD)**. Give the dates, the place or client, and the reason. It goes to your reporting manager.
+2. Once approved, on each OD day your home screen shows an **On duty today** card.
+3. **You do not check in or check out.** Instead tap **Share my location** once that day. That share is the record of the day.
+
+You can share again later in the day if you move; every share is kept and your manager can see each one on a map.
+
+**An OD day with nothing shared is counted absent.** If you could not share it on the day — no signal, phone dead — use Regularize for that date and your manager can approve it.
+
+OD days are not counted for late coming or early leaving, because there is no shift to be late for.
+
+Weekly offs and holidays inside an OD period need nothing; they stay days off. To be paid for working on a day off, use Work on Holiday instead.
+
 ## Regularization
 @roles: all
-Use Regularize on the home screen for a day you forgot to check in or out, or where the times are wrong. Give the date, times and reason, and it goes to your manager.
+Use Regularize on the home screen for a day you forgot to check in or out, where the times are wrong, where you checked out at a different office, or an OD day where you could not share your location. Give the date, times and reason, and it goes to your manager.
 
 ## My profile
 @roles: all
@@ -880,10 +953,25 @@ Open My Team, or your dashboard, to reach these tabs.
 | Leaves | Approve or reject leave |
 | Regularize | Approve missed attendance and late or early regularizations |
 | Comp Off | Approve work on days off, cancel approvals or credits, view balances |
+| On Duty | Approve OD, see which OD days had a location shared, cancel an OD |
 | Payroll | Monthly summary and CSV export |
 
 ### Work on a day off
 Approve only where the work is genuinely needed, because an approval creates a comp off liability once the person works. Each day is decided separately. Under Approved you can see what was actually worked, cancel a future day, or cancel a credit already earned.
+
+### On duty (OD)
+Approve OD only where the person is genuinely being sent somewhere that is not a firm office. An approved OD day is a paid working day with **no check-in and no check-out** — the only evidence is the location the person shares, so approve it as deliberately as you would a day off.
+
+| Tab | What it shows |
+| --- | --- |
+| Requests | Pending OD. You can add a remark before approving or rejecting |
+| Approved | Every OD, day by day, with how many times location was shared and a map link for each |
+| ⚠ No location | Approved OD days already past where nothing was ever shared |
+
+A day on the **No location** list is counted absent in payroll until the person raises a regularization and you approve it. Clear that list before payroll. Cancelling an OD removes the entitlement for its remaining days; days already recorded stay.
+
+### Check-out at the wrong place
+Check-out away from any of the person's offices is refused by the app, so they will raise a regularization instead. A check-out at a *different* office of theirs goes through, you are notified, and it appears in the day-wise record — approve it through Regularize.
 
 ### Late and early regularization
 Approving clears the instance. Approving more than the monthly limit places that person on the Exception list seen by HR and the HOD. Approval is never blocked, but it is visible.
@@ -934,11 +1022,13 @@ Payroll, choose the month, then Export to Excel. Working days are worked out per
 
 **Check the Exceptions tab before processing payroll.** Anything still Open at month end is Loss of Pay.
 
+**Check On Duty, No location, too.** Those days read as absent until regularized. The monthly export has an OD column and an OD no location column, and the day-wise export shows each OD day, the place and how many times location was shared.
+
 Backups hold settings only: staff, offices, teams, policies, holidays, rules and balances. Attendance and leave records are stored separately and are never touched by a restore. Backups run twice daily and before settings changes, and the newest 30 are kept. Take a manual backup before any bulk change.
 
 ## What the app does not do
 @roles: all
-- **No background location tracking.** Location is read only while the app is open, and at check-in and check-out
+- **No background location tracking.** Location is read only while the app is open, and at check-in, check-out and when you share it on an OD day. A browser cannot read location with the app closed, so OD is based on the shares you make, not continuous tracking
 - **No WhatsApp or SMS alerts.** Notifications are inside the app only
 - **No face matching.** The selfie is recorded, not verified
 - **No salary calculation.** The app gives attendance and leave in days
@@ -1100,7 +1190,12 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [outBusy,setOutBusy]=useState(false);
   const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
-  const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod());
+  const [pingBusy,setPingBusy]=useState(false),[showPunch,setShowPunch]=useState(false);
+  // An OD record is not a normal check-in, so it must not drive the punch card
+  const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod()&&!a.isOD);
+  const myOD=odOn(D,user.id,tod());                                              // approved OD covering today
+  const odR=(D.attendance||[]).find(a=>a.userId===user.id&&a.date===tod()&&a.isOD)||null;
+  const odPend=(D.ods||[]).find(o=>o.userId===user.id&&o.status==="pending"&&tod()>=o.from&&tod()<=odEnd(o));
   const tm=D.teams.find(t=>t.id===user.teamId);
   const sh=user.customShift||(tm?{shiftStart:tm.shiftStart,shiftEnd:tm.shiftEnd}:null);
   const pl=(D.leaves||[]).filter(l=>l.userId===user.id&&l.status==="pending").length;
@@ -1209,6 +1304,39 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       }
     }
   };
+  // On duty: no check-in or check-out, but the location must be shared at least
+  // once. The first share creates the day's record; later ones are added to it.
+  const doPing=async()=>{
+    if(pingBusy||!myOD)return;
+    setPingBusy(true);
+    const p=await quickPos(12000);
+    if(!p){
+      ST("Could not read your location. Step outside or near a window, make sure GPS is on, and try again.","error");
+      setPingBusy(false);return;
+    }
+    const now=new Date().toISOString();
+    const ping={ts:now,lat:p.lat,lng:p.lng,ac:p.ac||0};
+    try{
+      if(odR){
+        const prev=(odR.odPings&&odR.odPings.length)?odR.odPings:[{ts:odR.checkIn,...(odR.gps||{})}];
+        await updateAttendance(odR.id,{odPings:[...prev,ping],lastPing:now});
+        ST(`📍 Location shared — ${prev.length+1} today`);
+      }else{
+        await addAttendance({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
+          date:tod(),checkIn:now,checkOut:null,selfie:null,gps:ping,
+          officeName:`OD — ${myOD.place}`,officeId:null,
+          status:"od",isOD:true,odId:myOD.id,odPlace:myOD.place,
+          odPings:[ping],lastPing:now,lateBy:0,isWFH:false});
+        ST("📍 On duty — location shared. Your day is recorded.");
+        const mg=(D.users||[]).find(u=>u.id===user.reportingTo);
+        if(mg)AN(mg.id,`${user.name} shared location for OD at ${myOD.place}.`,"info");
+      }
+      updateLiveLocation(user.id,{lat:p.lat,lng:p.lng,ac:p.ac||0,ts:now}).catch(()=>{});
+    }catch(e){
+      ST("Could not save the location. Check your internet and try again.","error");
+    }
+    setPingBusy(false);
+  };
   const doOut=async()=>{
     if(outBusy)return;
     setOutBusy(true);
@@ -1216,10 +1344,36 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     try{
       const cg=await quickPos(6000);                 // at most 6 seconds, then proceed anyway
       const ebm=(!rec.isWFH&&sh)?minsBeforeEnd(checkOutTime,sh.shiftEnd):0;
-      await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg,earlyBy:ebm});
+      // Where the check-out is allowed from. WFH has no office, so no rule.
+      // Otherwise check-out must be at an office assigned to this person; a
+      // different office than the check-in is allowed but goes to the manager.
+      const extra={};
+      if(!rec.isWFH&&cg){
+        const mine=(user.officeIds||[]).map(id=>(D.offices||[]).find(o=>o.id===id)).filter(Boolean);
+        const at=mine.find(o=>dist(cg.lat,cg.lng,o.lat,o.lng)<=(o.radius||200)+(cg.ac||0));
+        if(mine.length&&!at){
+          const near=mine.reduce((b,o)=>{const d=dist(cg.lat,cg.lng,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
+          ST(`Check-out must be from an office. You are ${Math.round(near?.d||0)}m from ${near?.name||"your office"}. If you have already left, use Regularize to record your check-out time.`,"error");
+          setOutBusy(false);return;
+        }
+        if(at&&rec.officeId&&at.id!==rec.officeId){
+          extra.outOfficeChanged=true;extra.checkOutOfficeId=at.id;extra.checkOutOfficeName=at.name;
+        }
+      } else if(!rec.isWFH&&!cg){
+        extra.outLocUnverified=true;                 // GPS did not answer — recorded, not blocked
+      }
+      await updateAttendance(rec.id,{checkOut:checkOutTime,checkOutGps:cg,earlyBy:ebm,...extra});
       if(cg)updateLiveLocation(user.id,{lat:cg.lat,lng:cg.lng,ac:cg.ac||0,ts:checkOutTime}).catch(()=>{});
       notifyCheckout(user,fT(checkOutTime),wHr(rec.checkIn,checkOutTime)||"");
-      ST(ebm>0?`👋 Checked out · ${ebm} min before shift end`:"👋 Checked out");
+      if(extra.outOfficeChanged){
+        const mg=(D.users||[]).find(u=>u.id===user.reportingTo);
+        if(mg)AN(mg.id,`${user.name} checked in at ${rec.officeName} and checked out at ${extra.checkOutOfficeName} on ${fD(tod())}. Needs regularization.`,"info");
+        ST(`👋 Checked out at ${extra.checkOutOfficeName} — different from your check-in office. Please raise a regularization so your manager can approve it.`,"error");
+      } else if(extra.outLocUnverified){
+        ST("👋 Checked out — your location could not be confirmed, so it is recorded as unverified.");
+      } else {
+        ST(ebm>0?`👋 Checked out · ${ebm} min before shift end`:"👋 Checked out");
+      }
     }catch(e){
       ST("Check-out could not be saved. Check your internet and try again.","error");
     }
@@ -1256,7 +1410,40 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         {sh&&sh.shiftEnd<=sh.shiftStart&&<div style={{marginTop:8,background:"rgba(255,255,255,.18)",border:"1px solid #fff",borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:11,color:"#fff"}}>⚠ Shift timings look wrong — tell HR</div>}
         {sh&&<div style={{marginTop:8,background:"rgba(255,255,255,.14)",border:"1px solid rgba(255,255,255,.3)",borderRadius:8,padding:"4px 12px",display:"inline-block",fontSize:12,color:"#fff"}}>🕘 {sh.shiftStart}–{sh.shiftEnd}</div>}
       </div>
-      <div style={K}>
+      {myOD&&(()=>{
+        const pings=(odR?.odPings||[]).length||(odR?1:0);
+        const last=pings?((odR.odPings||[]).slice(-1)[0]?.ts||odR.checkIn):null;
+        return (
+          <div style={{...K,border:`1px solid ${pings?G.gr:G.am}`,background:pings?"#f1f9f4":"#fff9ef"}}>
+            <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+              <div style={{fontSize:26}}>🚗</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:800,fontSize:14}}>On duty today · {myOD.place}</div>
+                <div style={{fontSize:12,color:G.mut,marginTop:2}}>
+                  {pings
+                    ? `Location shared ${pings} time${pings>1?"s":""} · last at ${fT(last)}. Your day is recorded — no check-in or check-out needed.`
+                    : "No check-in or check-out needed today. Share your location once to record the day."}
+                </div>
+              </div>
+            </div>
+            <button onClick={doPing} disabled={pingBusy}
+              style={{...B(pingBusy?G.dim:pings?G.card:G.gold),width:"100%",marginTop:10,fontWeight:800,
+                color:pings&&!pingBusy?G.txt:"#fff",border:pings&&!pingBusy?`1px solid ${G.bdr}`:"none"}}>
+              {pingBusy?"Getting your location…":pings?"📍 Share location again":"📍 Share my location"}
+            </button>
+            {!pings&&<div style={{fontSize:11,color:G.am,marginTop:6}}>Until you share it, today counts as absent.</div>}
+            <div onClick={()=>setShowPunch(!showPunch)} style={{fontSize:11,color:G.bl,marginTop:8,cursor:"pointer",textDecoration:"underline"}}>
+              {showPunch?"Hide check-in":"I am at an office today — check in normally"}
+            </div>
+          </div>
+        );
+      })()}
+      {odPend&&!myOD&&(
+        <div style={{...K,background:"#fff9ef",border:`1px solid ${G.am}`,fontSize:12,color:G.am}}>
+          🚗 Your OD request for today is still awaiting your manager's approval. Until it is approved, check in as usual.
+        </div>
+      )}
+      {(!myOD||showPunch)&&<div style={K}>
         {(!rec||(rec&&rec.checkOut))?(
           <>
             {step==="idle"&&(
@@ -1338,10 +1525,10 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
             )}
           </div>
         )}
-      </div>
+      </div>}
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["Help & manual","help"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["On Duty (OD)","odreq"],["Help & manual","help"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -1529,6 +1716,103 @@ function WorkReq({user,D,ST,AN,setSc}) {
     </div>
   );
 }
+
+// ── Staff: request On Duty (sent to a non-office location, on duty) ──
+function ODReq({user,D,ST,AN,setSc}) {
+  const [f,setF]=useState({from:tod(),to:tod(),place:"",reason:""});
+  const [busy,setBusy]=useState(false);
+  const mine=(D.ods||[]).filter(o=>o.userId===user.id).sort((a,b)=>b.from.localeCompare(a.from));
+  const mgr=(D.users||[]).find(u=>u.id===user.reportingTo);
+  const hols=holsFor(D,user), wo=user.weeklyOff||"sun_sat";
+  const stCol={pending:G.am,approved:G.gr,rejected:G.rd,cancelled:G.dim};
+  const span=f.from&&f.to&&f.to>=f.from?odDates({from:f.from,to:f.to}):[];
+  const workDays=span.filter(ds=>!isDayOff(ds,hols,wo)).length;
+  const submit=async()=>{
+    if(!f.from||!f.to)return ST("Choose the dates","error");
+    if(f.to<f.from)return ST("The 'to' date is before the 'from' date","error");
+    if(span.length>31)return ST("Apply for at most 31 days at a time","error");
+    if(!f.place.trim())return ST("Where are you being sent? Enter the place or client","error");
+    if(!f.reason.trim())return ST("Please give a reason","error");
+    if(!mgr)return ST("No reporting manager set — ask admin to set one","error");
+    const clash=mine.find(o=>o.status!=="cancelled"&&o.status!=="rejected"&&f.from<=odEnd(o)&&f.to>=o.from);
+    if(clash)return ST(`Overlaps an existing OD request (${fD(clash.from)}–${fD(odEnd(clash))})`,"error");
+    setBusy(true);
+    await addOD({id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,managerId:mgr.id,
+      from:f.from,to:f.to,place:f.place.trim(),reason:f.reason.trim(),
+      appliedOn:new Date().toISOString(),status:"pending"});
+    AN(mgr.id,`${user.name} has applied for OD from ${fD(f.from)} to ${fD(f.to)} at ${f.place.trim()}. Reason: ${f.reason.trim()}`,"info");
+    ST(`OD request sent to ${mgr.name}`);
+    setF({from:tod(),to:tod(),place:"",reason:""});setBusy(false);
+  };
+  const withdraw=async o=>{
+    if(!confirm(`Withdraw OD for ${fD(o.from)}${o.to!==o.from?` – ${fD(odEnd(o))}`:""}?`))return;
+    await updateOD(o.id,{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});
+    ST("Withdrawn");
+  };
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",padding:"20px 20px 40px"}}>
+      <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14}}>
+        <button onClick={()=>setSc("home")} style={{...B(G.card),border:`1px solid ${G.bdr}`,padding:"8px 14px"}}>← Back</button>
+        <h2 style={{margin:0,fontSize:17,fontWeight:800}}>On Duty (OD)</h2>
+      </div>
+      <div style={{...K,background:G.card2}}>
+        <div style={{fontSize:12,color:G.mut}}>
+          Use OD when you are sent to work somewhere that is not one of the firm's offices — a client site, a department, a court, a bank. Your manager approves it in advance. On an approved OD day you do <b>not</b> check in or check out, but you must <b>share your location at least once</b> from the home screen. That share is the record of the day.
+        </div>
+        <div style={{fontSize:11,color:G.am,marginTop:8}}>
+          An OD day with no location shared is counted absent until you regularize it.
+        </div>
+      </div>
+      <div style={K}>
+        <div style={{fontWeight:800,fontSize:14,marginBottom:8}}>New OD request</div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{flex:1}}><label style={L}>From</label>
+            <input type="date" style={I} value={f.from} onChange={e=>setF({...f,from:e.target.value,to:f.to<e.target.value?e.target.value:f.to})}/></div>
+          <div style={{flex:1}}><label style={L}>To</label>
+            <input type="date" style={I} value={f.to} min={f.from} onChange={e=>setF({...f,to:e.target.value})}/></div>
+        </div>
+        <label style={L}>Place / client</label>
+        <input style={I} value={f.place} onChange={e=>setF({...f,place:e.target.value})} placeholder="e.g. ABC Ltd, Sitapura plant"/>
+        <label style={L}>Reason</label>
+        <textarea style={{...I,minHeight:52,resize:"vertical"}} value={f.reason} onChange={e=>setF({...f,reason:e.target.value})} placeholder="e.g. stock audit at client premises"/>
+        {span.length>0&&(
+          <div style={{fontSize:11,color:G.mut,marginBottom:8}}>
+            {span.length} day{span.length>1?"s":""} selected · {workDays} working day{workDays===1?"":"s"}
+            {span.length>workDays?` · ${span.length-workDays} weekly off / holiday (no OD needed)`:""}
+          </div>
+        )}
+        <button disabled={busy} onClick={submit} style={{...B(G.gold),width:"100%",fontWeight:800,color:"#fff"}}>
+          {busy?"Sending…":`Send to ${mgr?.name||"manager"}`}
+        </button>
+      </div>
+      <div style={{color:G.mut,fontSize:11,fontWeight:700,textTransform:"uppercase",margin:"14px 0 8px"}}>My OD requests</div>
+      {mine.length===0&&<div style={{textAlign:"center",color:G.dim,padding:20}}>Nothing applied for yet.</div>}
+      {mine.map(o=>{
+        const miss=o.status==="approved"?odMissing(D,user,null).filter(m=>m.od.id===o.id):[];
+        return (
+          <div key={o.id} style={{...K,padding:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:13}}>{fD(o.from)}{o.to!==o.from?` – ${fD(odEnd(o))}`:""}</div>
+                <div style={{fontSize:12,color:G.gold}}>🚗 {o.place}</div>
+                <div style={{fontSize:12,color:G.mut,fontStyle:"italic"}}>"{o.reason}"</div>
+                {o.remark&&<div style={{fontSize:11,color:G.dim,marginTop:2}}>Manager: {o.remark}</div>}
+                {miss.length>0&&<div style={{fontSize:11,color:G.rd,marginTop:3}}>
+                  No location shared on {miss.map(m=>fD(m.date)).join(", ")} — use Regularize for those days.
+                </div>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
+                <Chip bg={stCol[o.status]||G.dim} label={o.status} sm/>
+                {o.status==="pending"&&<button onClick={()=>withdraw(o)} style={{...B(G.card2),border:`1px solid ${G.bdr}`,fontSize:11,padding:"4px 8px"}}>Withdraw</button>}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Hist({user,D,setSc}) {
   const now=new Date();
   const [yr,setYr]=useState(now.getFullYear());
@@ -1814,7 +2098,7 @@ function Reg({user,D,P,ST,setSc}) {
 function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
-  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
+  const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
   const isHR=user.role==="hr";
   const isHOD=user.role==="hod";
   const vu0=isA||isHR
@@ -1839,6 +2123,8 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
   const mon=tod().slice(0,7);
   const pX=vu.filter(u=>{const s=leIncidents(D,u,mon);return s.exception||s.open>0;}).length;
   const pC=(D.workApprovals||[]).filter(w=>w.status==="pending"&&vu.some(u=>u.id===w.userId)).length;
+  const pO=(D.ods||[]).filter(o=>o.status==="pending"&&vu.some(u=>u.id===o.userId)).length
+    +vu.reduce((n,u)=>n+odMissing(D,u,null).length,0);
   const tp={D,P,ST,AN,vu,isA,user};
   return (
     <div style={{maxWidth:500,margin:"0 auto",padding:"14px 14px 80px"}}>
@@ -1859,6 +2145,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
             {id==="lv"&&pL>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pL}</span>}
             {id==="co"&&pC>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pC}</span>}
             {id==="ex"&&pX>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.rd,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pX}</span>}
+            {id==="od"&&pO>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pO}</span>}
             {id==="rg"&&pR>0&&<span style={{position:"absolute",top:-4,right:-4,background:G.am,color:"#fff",borderRadius:"50%",width:14,height:14,fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>{pR}</span>}
           </button>
         ))}
@@ -1928,6 +2215,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
       {tab==="br"&&isA&&<BR {...tp}/>}
       {tab==="bk"&&isA&&<BK {...tp}/>}
       {tab==="co"&&<COM {...tp}/>}
+      {tab==="od"&&<ODM {...tp}/>}
       {tab==="lb"&&(isA||isHOD)&&<LB {...tp}/>}
       {tab==="ex"&&(isA||isHOD)&&<EX {...tp}/>}
       {tab==="le"&&(isA||isHOD)&&<LER {...tp}/>}
@@ -1955,12 +2243,14 @@ function OV({D,vu}) {
   const ab=Math.max(0,tot-ci);
   const pct=tot?Math.round((ci/tot)*100):0;
   const lt=uniqueRecs.filter(r=>r.status==="late").length;
+  const odC=uniqueRecs.filter(r=>r.isOD).length;
+  const odNo=vu.reduce((n,u)=>n+odMissing(D,u,todayStr.slice(0,7)).filter(m=>m.date===todayStr).length,0);
   const lN=vu.filter(u=>D.liveLocations?.[u.id]).length;
-  const sb={present:G.gr,late:G.am,wfh:G.bl};
+  const sb={present:G.gr,late:G.am,wfh:G.bl,od:G.pu};
   return (
     <>
       <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
-        {[["✅","Present",ci,G.gr],["❌","Absent",ab,G.rd],["🏠","WFH",wC,G.bl],["⚠️","Late",lt,G.am]].map(([ic,lb,v,c])=>(
+        {[["✅","Present",ci,G.gr],["❌","Absent",ab,G.rd],["🏠","WFH",wC,G.bl],["🚗","OD",odC,G.pu],["⚠️","Late",lt,G.am]].map(([ic,lb,v,c])=>(
           <div key={lb} style={{...K,flex:"1 1 60px",textAlign:"center",padding:"10px 6px",marginBottom:0}}><div style={{fontSize:16}}>{ic}</div><div style={{fontSize:20,fontWeight:900,color:c}}>{v}</div><div style={{fontSize:9,color:G.dim,textTransform:"uppercase",fontWeight:700,marginTop:2}}>{lb}</div></div>
         ))}
       </div>
@@ -1968,14 +2258,15 @@ function OV({D,vu}) {
         <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontWeight:700}}>Attendance</span><span style={{color:G.gold,fontWeight:900}}>{pct}%</span></div>
         <div style={{background:G.card2,borderRadius:8,height:9,overflow:"hidden"}}><div style={{background:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${pct}%`,borderRadius:8,transition:"width .5s"}}/></div>
         <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}><span style={{fontSize:11,color:G.dim}}>{ci}/{tot} in</span><span style={{fontSize:11,color:G.bl}}>📍{lN} live</span></div>
+        {odNo>0&&<div style={{marginTop:6,fontSize:11,color:G.rd}}>🚗 {odNo} on OD today with no location shared yet</div>}
       </div>
       <div style={K}>
         <div style={{fontWeight:700,marginBottom:8,color:G.gold}}>Today</div>
         {vu.map(u=>{const r=userLatest[u.id],lv=D.liveLocations?.[u.id];return(
           <div key={u.id} style={{display:"flex",gap:8,alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${G.bdr}`}}>
             {r?.selfie?<img src={r.selfie} style={{width:34,height:34,borderRadius:"50%",objectFit:"cover",border:`2px solid ${G.gold}`}}/>:<div style={{width:34,height:34,borderRadius:"50%",background:G.card2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>👤</div>}
-            <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700}}>{u.name}{lv&&<span style={{marginLeft:5,width:6,height:6,background:G.gr,borderRadius:"50%",display:"inline-block",animation:"pulse 2s infinite"}}/>}</div><div style={{fontSize:11,color:G.dim}}>{r?`In:${fT(r.checkIn)}${r.checkOut?` Out:${fT(r.checkOut)}`:""}${r.lateBy>0?` ⚠️${r.lateBy}m`:""}${r.isWFH?" 🏠":""}` : "Absent"}</div></div>
-            <Chip bg={r?(sb[r.status]||G.gr):G.rd} label={r?r.status:"—"} sm/>
+            <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700}}>{u.name}{lv&&<span style={{marginLeft:5,width:6,height:6,background:G.gr,borderRadius:"50%",display:"inline-block",animation:"pulse 2s infinite"}}/>}</div><div style={{fontSize:11,color:G.dim}}>{r?(r.isOD?`🚗 ${r.odPlace||"OD"} · shared ${(r.odPings||[]).length||1}× · last ${fT(r.lastPing||r.checkIn)}`:`In:${fT(r.checkIn)}${r.checkOut?` Out:${fT(r.checkOut)}`:""}${r.lateBy>0?` ⚠️${r.lateBy}m`:""}${r.isWFH?" 🏠":""}`) : (odOn(D,u.id,todayStr)?"On OD — no location shared":"Absent")}</div></div>
+            <Chip bg={r?(sb[r.status]||G.gr):(odOn(D,u.id,todayStr)?G.am:G.rd)} label={r?(r.isOD?"OD":r.status):(odOn(D,u.id,todayStr)?"OD?":"—")} sm/>
           </div>
         );})}
       </div>
@@ -2547,6 +2838,118 @@ function COM({D,ST,AN,user,vu,isA}) {
   );
 }
 
+// ── On Duty: manager approves, and sees whether location was shared ──
+function ODM({D,ST,AN,user,vu}) {
+  const [tab,setTab]=useState("req");
+  const [rem,setRem]=useState({});
+  const today=tod();
+  const inScope=o=>vu.some(u=>u.id===o.userId);
+  const all=(D.ods||[]).filter(inScope);
+  const pend=all.filter(o=>o.status==="pending").sort((a,b)=>a.from.localeCompare(b.from));
+  const appr=all.filter(o=>o.status==="approved").sort((a,b)=>b.from.localeCompare(a.from));
+  const flags=vu.flatMap(u=>odMissing(D,u,null).map(m=>({...m,user:u})))
+    .sort((a,b)=>b.date.localeCompare(a.date));
+  const decide=async(o,status)=>{
+    const remark=(rem[o.id]||"").trim();
+    await updateOD(o.id,{status,remark,reviewedBy:user.id,reviewedByName:user.name,reviewedOn:new Date().toISOString()});
+    AN(o.userId,status==="approved"
+      ?`OD approved for ${fD(o.from)}${o.to!==o.from?` – ${fD(odEnd(o))}`:""} at ${o.place}. No check-in or check-out needed — share your location once each OD day.`
+      :`Your OD request for ${fD(o.from)}${o.to!==o.from?` – ${fD(odEnd(o))}`:""} was rejected.${remark?` Reason: ${remark}`:""}`,
+      status==="approved"?"success":"error");
+    ST(status==="approved"?"OD approved":"OD rejected");
+    setRem(p=>({...p,[o.id]:""}));
+  };
+  const cancel=async o=>{
+    if(!confirm(`Cancel OD for ${o.userName} (${fD(o.from)}${o.to!==o.from?` – ${fD(odEnd(o))}`:""})?`))return;
+    await updateOD(o.id,{status:"cancelled",cancelledBy:user.id,cancelledOn:new Date().toISOString()});
+    AN(o.userId,`Your OD for ${fD(o.from)}${o.to!==o.from?` – ${fD(odEnd(o))}`:""} was cancelled by ${user.name}.`,"error");
+    ST("Cancelled");
+  };
+  const dayRows=o=>{
+    const u=(D.users||[]).find(x=>x.id===o.userId);
+    const hols=u?holsFor(D,u):[], wo=u?.weeklyOff||"sun_sat";
+    return odDates(o).map(ds=>{
+      const off=isDayOff(ds,hols,wo);
+      const r=odRecOn(D,o.userId,ds);
+      return {date:ds,off,r,
+        state:off?"day off":r?`shared ${r.pings}×`:ds>today?"upcoming":"not shared"};
+    });
+  };
+  return (
+    <>
+      <div style={{...K,background:G.card2,border:`1px solid ${G.navyL}`}}>
+        <div style={{color:G.gold,fontWeight:700,fontSize:13}}>🚗 On Duty (OD)</div>
+        <div style={{color:G.dim,fontSize:12,marginTop:3}}>
+          Staff sent somewhere that is not a firm office. On an approved OD day there is no check-in or check-out — the staff shares their location instead, and that share is the record. A day with nothing shared is flagged here and counted absent until regularized.
+        </div>
+      </div>
+      <div style={{display:"flex",gap:6,marginBottom:10}}>
+        {[["req",`Requests${pend.length?` (${pend.length})`:""}`],["appr","Approved"],["flag",`⚠ No location${flags.length?` (${flags.length})`:""}`]].map(([v,lb])=>(
+          <button key={v} onClick={()=>setTab(v)} style={{...B(tab===v?G.gold:G.card),flex:1,fontSize:11,padding:"8px 5px",border:tab===v?"none":`1px solid ${G.bdr}`}}>{lb}</button>
+        ))}
+      </div>
+
+      {tab==="req"&&(<>
+        {pend.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30}}>No pending OD requests.</div>}
+        {pend.map(o=>(
+          <div key={o.id} style={K}>
+            <div style={{fontWeight:800}}>{o.userName}</div>
+            <div style={{fontSize:13,color:G.gold,marginTop:2}}>{fD(o.from)}{o.to!==o.from?` – ${fD(odEnd(o))}`:""} · {odDates(o).length} day{odDates(o).length>1?"s":""}</div>
+            <div style={{fontSize:13,fontWeight:700,marginTop:2}}>🚗 {o.place}</div>
+            <div style={{fontSize:12,color:G.mut,fontStyle:"italic",marginTop:2}}>"{o.reason}"</div>
+            <input style={{...I,marginTop:8,marginBottom:6}} value={rem[o.id]||""} onChange={e=>setRem({...rem,[o.id]:e.target.value})} placeholder="Remark (optional)"/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>decide(o,"approved")} style={{...B(G.gr),flex:2,fontSize:13}}>Approve</button>
+              <button onClick={()=>decide(o,"rejected")} style={{...B(G.rd),flex:1,fontSize:13}}>Reject</button>
+            </div>
+          </div>
+        ))}
+      </>)}
+
+      {tab==="appr"&&(<>
+        {appr.length===0&&<div style={{textAlign:"center",color:G.dim,padding:30}}>Nothing approved yet.</div>}
+        {appr.map(o=>{
+          const rows=dayRows(o);
+          return (
+            <div key={o.id} style={K}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:800}}>{o.userName}</div>
+                  <div style={{fontSize:12,color:G.mut}}>{fD(o.from)}{o.to!==o.from?` – ${fD(odEnd(o))}`:""}</div>
+                  <div style={{fontSize:12,fontWeight:700,color:G.gold}}>🚗 {o.place}</div>
+                </div>
+                <button onClick={()=>cancel(o)} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>Cancel</button>
+              </div>
+              <div style={{marginTop:8,borderTop:`1px solid ${G.bdr}`,paddingTop:6}}>
+                {rows.map(d=>(
+                  <div key={d.date} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 0",opacity:d.off?.6:1}}>
+                    <div style={{fontSize:12}}>{fD(d.date)}</div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontSize:11,fontWeight:700,color:d.off?G.dim:d.r?G.gr:d.date>today?G.dim:G.rd}}>{d.state}</span>
+                      {d.r?.rec?.gps&&<a href={`https://maps.google.com/?q=${d.r.rec.gps.lat},${d.r.rec.gps.lng}`} target="_blank" rel="noreferrer" style={{fontSize:11,color:G.bl}}>map</a>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </>)}
+
+      {tab==="flag"&&(<>
+        {flags.length===0&&<div style={{textAlign:"center",color:G.gr,padding:30}}>Every OD day so far has a shared location.</div>}
+        {flags.map(m=>(
+          <div key={m.user.id+m.date} style={{...K,border:`1px solid ${G.rd}44`}}>
+            <div style={{fontWeight:800}}>{m.user.name}</div>
+            <div style={{fontSize:12,color:G.mut}}>{fD(m.date)} · 🚗 {m.place}</div>
+            <div style={{fontSize:12,color:G.rd,marginTop:3}}>Approved for OD but no location was ever shared. Counted absent until the staff raises a regularization and you approve it.</div>
+          </div>
+        ))}
+      </>)}
+    </>
+  );
+}
+
 // ── Leave balances as on date (HR / Admin: everyone; HOD: own teams) ──
 function LB({D,P,ST,AN,user,vu}) {
   const staff=vu.filter(u=>u.role!=="admin"&&u.id!==user.id);   // nobody sets their own balance
@@ -2790,6 +3193,9 @@ function PT({D,vu,ST,user}) {
     ar.forEach(r=>{ if(isDayOff(r.date,uHols,uWO))return; const p=byDate[r.date]; if(!p||r.status==="present"||(r.status==="late"&&p.status==="wfh"))byDate[r.date]=r; });
     const days=Object.values(byDate);
     const pr=days.filter(r=>r.status==="present").length,lt=days.filter(r=>r.status==="late").length,wf=days.filter(r=>r.isWFH||r.status==="wfh").length;
+    // On duty: a shared location on an approved OD day is a present day
+    const odc=days.filter(r=>r.isOD).length;
+    const odMiss=odMissing(D,u,`${yr}-${String(mo).padStart(2,"0")}`).length;
     // Approved leave counted in days that fall inside this month
     const eNext=addDays(e,1);
     const ap=(D.leaves||[]).filter(l=>l.userId===u.id&&l.status==="approved"&&l.from<eNext&&(l.to||l.from)>=s);
@@ -2806,11 +3212,11 @@ function PT({D,vu,ST,user}) {
     const pd=Math.min(wd,Math.round((tp+cl+sl+st+co)*10)/10),ab=Math.max(0,Math.round((wdSoFar-pd)*10)/10);
     const team=D.teams.find(t=>t.id===u.teamId);
     const cal=calsOf(D).find(x=>x.id===calIdOf(u));
-    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,wdSoFar,pr,lt,wf,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
+    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,wdSoFar,pr,lt,wf,odc,odMiss,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
   const [open,setOpen]=useState(null);         // staff shown day-by-day
-  const dayHead=["Staff","Date","Day","Day type","Status","Check in","Check out","Hours","Late (min)","Early (min)","Mode","Office","Sessions","Regularized","Comp off day","Remarks"];
-  const dayRow=(u,d)=>[u.name,d.date,d.day,d.dayType,d.status,d.inT,d.outT,d.hours,d.lateM||"",d.earlyM||"",d.mode,d.office,d.sessions||"",d.regularized?"Yes":"",d.compOffDay?"Yes":"",d.note];
+  const dayHead=["Staff","Date","Day","Day type","Status","Check in / first ping","Check out / last ping","Hours","Late (min)","Early (min)","Mode","Office / OD place","Sessions","Regularized","Comp off day","OD day","Location shares","Remarks"];
+  const dayRow=(u,d)=>[u.name,d.date,d.day,d.dayType,d.status,d.inT,d.outT,d.hours,d.lateM||"",d.earlyM||"",d.mode,d.office,d.sessions||"",d.regularized?"Yes":"",d.compOffDay?"Yes":"",d.odDay?"Yes":"",d.odPings||"",d.note];
   const csvDownload=(rows,file)=>{
     const csv=rows.map(r=>r.map(x=>`"${String(x??"").replace(/"/g,'""')}"`).join(",")).join("\n");
     const a=document.createElement("a");
@@ -2829,8 +3235,8 @@ function PT({D,vu,ST,user}) {
     ST("Day-wise record for all staff downloaded");
   };
   const exp=()=>{
-    const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Working Days So Far","Present","Late","WFH","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
-    const dr=rows.map(r=>[r.name,r.email,r.team,r.cal,r.offDays,r.wd,r.wdSoFar,r.pr,r.lt,r.wf,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
+    const h=["Name","Email","Team","Holiday Calendar","Off Days (WO+Holidays)","Working Days","Working Days So Far","Present","Late","WFH","OD","OD no location","Half Days","Casual","Sick","CompOff","Total Present","Paid Days","Absent","Late Count","Avg Hrs","Total Hrs","Attendance%","Month","Year"];
+    const dr=rows.map(r=>[r.name,r.email,r.team,r.cal,r.offDays,r.wd,r.wdSoFar,r.pr,r.lt,r.wf,r.odc,r.odMiss,r.hd,r.cl,r.sl,r.co,r.tp,r.pd,r.ab,r.lt2,r.aH,r.tH,`${r.pct}%`,ms[mo-1],yr]);
     const csv=[h,...dr].map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=`Nucleus_Payroll_${ms[mo-1]}_${yr}.csv`;a.click();ST("💰 Payroll exported!");
   };
@@ -2855,15 +3261,17 @@ function PT({D,vu,ST,user}) {
           </div>
           <div style={{background:G.card2,borderRadius:8,height:7,overflow:"hidden",marginBottom:8}}><div style={{background:r.pct<70?`linear-gradient(90deg,${G.rd},${G.am})`:`linear-gradient(90deg,${G.gold},${G.goldL})`,height:"100%",width:`${r.pct}%`,borderRadius:8}}/></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5}}>
-            {[["✅Pres",r.pr,G.gr],["⚠️Late",r.lt,G.am],["🏠WFH",r.wf,G.bl],["🌓Half",r.hd,G.pu],["🏖CL",r.cl,G.bl],["🤒SL",r.sl,G.rd],["📚Study",r.st,G.pu],["🔄CO",r.co,G.mut],["❌Ab",r.ab,r.ab>3?G.rd:G.dim],["⏱Hrs",r.tH,G.gold]].map(([lb,v,c])=>(
+            {[["✅Pres",r.pr,G.gr],["⚠️Late",r.lt,G.am],["🏠WFH",r.wf,G.bl],["🚗OD",r.odc,G.pu],["🌓Half",r.hd,G.pu],["🏖CL",r.cl,G.bl],["🤒SL",r.sl,G.rd],["📚Study",r.st,G.pu],["🔄CO",r.co,G.mut],["❌Ab",r.ab,r.ab>3?G.rd:G.dim],["⏱Hrs",r.tH,G.gold]].map(([lb,v,c])=>(
               <div key={lb} style={{background:G.card2,borderRadius:8,padding:"5px 6px",textAlign:"center"}}><div style={{fontSize:9,color:G.dim,fontWeight:700}}>{lb}</div><div style={{fontSize:13,fontWeight:900,color:c}}>{v}</div></div>
             ))}
           </div>
           {r.lt>0&&<div style={{marginTop:6,background:"#fff6e8",border:`1px solid ${G.am}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.am}}>⚠️ {r.lt} late — apply deduction per policy</div>}
+          {r.odMiss>0&&<div style={{marginTop:6,background:"#fdeeee",border:`1px solid ${G.rd}44`,borderRadius:7,padding:"5px 8px",fontSize:11,color:G.rd}}>🚗 {r.odMiss} OD day{r.odMiss>1?"s":""} with no location shared — counted absent until regularized</div>}
           {open===r.id&&(()=>{
             const u=vu.find(x=>x.id===r.id); if(!u)return null;
             const dd=dayWise(D,u,yr,mo);
             const col=d=>d.status==="Absent"?G.rd:d.status==="Late"?G.am:d.status==="Present"?G.gr:d.status==="WFH"?G.bl:
+              d.status.startsWith("OD — location")?G.rd:d.status.startsWith("OD")?G.pu:
               d.status.includes("leave")?G.pu:G.dim;
             return (
               <div style={{marginTop:10,borderTop:`1px solid ${G.bdr}`,paddingTop:8}}>

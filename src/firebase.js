@@ -205,6 +205,18 @@ export const onWorkApprovals = (cb) => onSnapshot(
   snap => cb(snap.docs.map(d => d.data()))
 );
 
+// ── On Duty (OD) ──────────────────────────────────────────────────
+export const addOD = async (rec) => {
+  await setDoc(doc(db, 'odRequests', rec.id), { ...rec, updatedAt: serverTimestamp() });
+};
+export const updateOD = async (id, data) => {
+  await updateDoc(doc(db, 'odRequests', id), { ...data, updatedAt: serverTimestamp() });
+};
+export const onODs = (cb) => onSnapshot(
+  collection(db, 'odRequests'),
+  snap => cb(snap.docs.map(d => d.data()))
+);
+
 // ── Comp Offs ─────────────────────────────────────────────────────
 export const addCompOff = async (rec) => {
   await setDoc(doc(db, 'compoffs', rec.id), { ...rec, updatedAt: serverTimestamp() });
