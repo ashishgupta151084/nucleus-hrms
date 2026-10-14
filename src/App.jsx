@@ -9,7 +9,8 @@ import {
   saveBackup, getBackups, getOlderBackups, restoreBackup,
   addWorkApproval, updateWorkApproval, onWorkApprovals,
   addCompOff, updateCompOff, onCompOffs,
-  addOD, updateOD, onODs
+  addOD, updateOD, onODs,
+  addLocFail, onLocFails
 } from "./firebase";
 
 // Strip undefined values before saving to Firestore
@@ -289,6 +290,21 @@ const leaveLedger=(D,user,type)=>{
   });
   return {rows,balance:bal};
 };
+// Record a check-in that the geofence refused, or a phone that gave no fix at
+// all. Admin reads these per office: failures that cluster at one distance mean
+// the office pin is wrong, not that the staff are lying.
+const logLocFail=async(user,gps,v)=>{
+  await addLocFail({
+    id:gid(),userId:user.id,userName:user.name,teamId:user.teamId||null,
+    date:tod(),ts:new Date().toISOString(),
+    lat:gps?gps.lat:null,lng:gps?gps.lng:null,ac:gps?gps.ac:null,
+    kind:v.kind,                                   // "out" or "nofix"
+    officeId:v.o?.id||null,officeName:v.o?.name||null,
+    distance:v.d!=null?Math.round(v.d):null,radius:v.r!=null?v.r:null,
+    appVersion:APP_VERSION
+  });
+};
+
 // ── On Duty (OD) ──────────────────────────────────────────────────
 // Staff is sent somewhere that is not an office but is on duty. The manager
 // approves it in advance. No check-in or check-out is required, but the
@@ -370,6 +386,7 @@ const dayWise=(D,u,yr,mo)=>{
       note:[wa?"approved to work on day off":"",
         isODday?`on duty — location shared ${(odR.odPings||[]).length||1}×`:"",
         odA&&!isODday&&!off&&ds<=today?"OD approved but location never shared — needs regularization":"",
+        first?.locUnverified?`location NOT verified at check-in${first.locAccuracy?` (±${first.locAccuracy}m${first.locDistance!=null?`, ${first.locDistance}m from office`:""})`:" — no fix at all"}`:"",
         first&&!lastOut&&!isODday?"missing check-out":"",
         first?.outOffOffice?"checked out away from office":"",
         first?.outOfficeChanged?`checked out at a different office (${first.checkOutOfficeName||"?"})`:"",
@@ -552,7 +569,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-10-07";
+const APP_VERSION="2026-10-14";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -662,7 +679,7 @@ function Cam({onDone,onCancel}) {
 }
 
 export default function App() {
-  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],workApprovals:[],compoffs:[],ods:[],liveLocations:{},notifications:[],loaded:false});
+  const [D,setD]=useState({...SEED,attendance:[],leaves:[],regularizations:[],workApprovals:[],compoffs:[],ods:[],locFails:[],liveLocations:{},notifications:[],loaded:false});
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
@@ -697,6 +714,7 @@ export default function App() {
   useEffect(()=>{const u=onWorkApprovals(r=>setD(p=>({...p,workApprovals:r})));return u;},[]);
   useEffect(()=>{const u=onCompOffs(r=>setD(p=>({...p,compoffs:r})));return u;},[]);
   useEffect(()=>{const u=onODs(r=>setD(p=>({...p,ods:r})));return u;},[]);
+  useEffect(()=>{const u=onLocFails(r=>setD(p=>({...p,locFails:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
   useEffect(()=>{
     if(!cu)return;
@@ -862,14 +880,17 @@ Your card shows live working hours while you are checked in, and the total once 
 WFH days have no location rule on check-out.
 
 ### If check-in is refused
-The screen shows the reason and a Location check panel with your position, GPS accuracy and your distance from each office.
+The screen shows the reason and a Location check panel with your position, accuracy and your distance from each office — it appears even when your phone gives no location at all.
+
+**If you are at the office and it still refuses you, use "Check in anyway — I am at the office".** Your real office and time are recorded, your late coming is still counted, and your manager is asked to confirm it. Do not switch to WFH when you are at the office: that records the wrong day and wipes your late coming from the record.
 
 | Message | What to do |
 | --- | --- |
-| You are N m from the office | Move closer, or use WFH if you are working remotely |
+| You are N m from the office | Move closer if you are not there yet; if you are there, use Check in anyway |
 | Location is blocked | Allow Location for this site in your phone settings |
 | GPS appears to be off | Turn on Location in your phone quick settings |
-| Request timed out | Move near a window and try again |
+| Request timed out | Move near a window and try again, or use Check in anyway |
+| Your phone gave no location at all | Use Check in anyway — your manager will confirm it |
 | No office is linked to your profile | Ask the admin to assign your office; use WFH meanwhile |
 | Your office link is broken | The office was removed or re-created; ask the admin to select it again |
 
@@ -970,6 +991,9 @@ Approve OD only where the person is genuinely being sent somewhere that is not a
 
 A day on the **No location** list is counted absent in payroll until the person raises a regularization and you approve it. Clear that list before payroll. Cancelling an OD removes the entitlement for its remaining days; days already recorded stay.
 
+### Unverified check-ins
+A check-in marked **location not verified** means the person was at the office but the phone could not prove it — a weak indoor fix, or none at all. The office and time are real and the late coming is counted; you are notified so you can confirm it. It shows in the day-wise record and the exports. If one person does this repeatedly, check the Office health panel before assuming anything about the person.
+
 ### Check-out at the wrong place
 Check-out away from any of the person's offices is refused by the app, so they will raise a regularization instead. A check-out at a *different* office of theirs goes through, you are notified, and it appears in the day-wise record — approve it through Regularize.
 
@@ -1011,6 +1035,13 @@ The staff list flags anyone with no office linked.
 ## Offices and holiday calendars
 @roles: hr
 Add an office with the map picker, the GPS button or coordinates, and set the geofence radius.
+
+### Office health — is the pin in the right place?
+Each office in the Offices list shows a **Location problems** line when check-ins there are being refused. Open it to see the last 30 days: how many were refused, how many went through as unverified, and the median distance of the refused attempts.
+
+When several different people are refused repeatedly from roughly the same spot, roughly the same distance from the pin, **the pin is wrong, not the staff.** The panel says so and gives two map links — where staff actually are, and where the pin is. Compare them, then use **Move pin here**.
+
+**Widen radius** is also offered, but it hides the problem rather than fixing it. Only widen where the pin is genuinely right and the site is large.
 
 **To move an office always use Edit, never delete and re-create it.** A re-created office has a different identity, and everyone linked to the old one silently loses their office. The app warns you how many staff are linked before you delete.
 
@@ -1190,6 +1221,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [outBusy,setOutBusy]=useState(false);
   const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
+  const [locSure,setLocSure]=useState(true);      // false = inside only after allowing for GPS error
   const [pingBusy,setPingBusy]=useState(false),[showPunch,setShowPunch]=useState(false);
   // An OD record is not a normal check-in, so it must not drive the punch card
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod()&&!a.isOD);
@@ -1204,6 +1236,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const now=new Date();
   const onSelfie=img=>{
     setSelfie(img);
+    setLocSure(true);                       // fresh attempt — assume verified until proven otherwise
     if(wfh){setStep("confirm");return;}
     setStep("loc");
     setLocWait({secs:0,acc:null});
@@ -1212,31 +1245,51 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       setStep("err");return;
     }
 
+    // What a reading proves, given that every fix has an error circle of ±ac:
+    //   "sure"  — inside even at the worst edge of the error circle (d + ac <= radius)
+    //   "maybe" — the error circle reaches the geofence (d <= radius + ac), so the
+    //             person may well be standing there; a poor fix must not punish them
+    //   "out"   — too far to be inside even at the best edge (d - ac > radius)
+    const myOffices=()=>(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
+    const verdict=(la,lo,ac)=>{
+      const offs=myOffices();
+      if(!offs.length)return {kind:"nooffice"};
+      const rows=offs.map(o=>({o,d:dist(la,lo,o.lat,o.lng),r:o.radius||200}))
+        .sort((a,b)=>(a.d-a.r)-(b.d-b.r));
+      const sure=rows.find(x=>x.d+ac<=x.r);
+      if(sure)return {kind:"sure",...sure};
+      const maybe=rows.find(x=>x.d<=x.r+ac);
+      if(maybe)return {kind:"maybe",...maybe};
+      return {kind:"out",...rows[0]};
+    };
     const evaluate=(la,lo,ac)=>{
       setGps({lat:la,lng:lo,ac:Math.round(ac)});
       const ids=(user.officeIds||[]);
-      const assignedOffices=ids.map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
-      if(assignedOffices.length===0){
+      const v=verdict(la,lo,ac);
+      if(v.kind==="nooffice"){
         setLocErr(ids.length===0
           ? "No office is linked to your profile, so your location cannot be checked. Ask the admin to assign your office (Staff → Edit → Offices). If you are working from home today, use WFH."
           : "Your office link is broken — that office was removed or re-created. Ask the admin to open Staff → Edit and select your office again.");
         setStep("err");return;
       }
-      const near=assignedOffices.find(o=>dist(la,lo,o.lat,o.lng)<=(o.radius||200)+ac);
-      if(near){ setOffice(near);setStep("confirm"); }
-      else {
-        const closest=assignedOffices.reduce((b,o)=>{const d=dist(la,lo,o.lat,o.lng);return(!b||d<b.d)?{...o,d}:b;},null);
-        setLocErr(`You are ${Math.round(closest?.d||0)}m from ${closest?.name||"office"} (allowed ${closest?.radius||200}m, GPS accuracy ±${Math.round(ac)}m). Move closer and try again, or use WFH if you are working remotely.`);
-        setStep("err");
+      if(v.kind==="sure"||v.kind==="maybe"){
+        setOffice(v.o);setLocSure(v.kind==="sure");setStep("confirm");return;
       }
+      setLocErr(`You are ${Math.round(v.d)}m from ${v.o.name} (allowed ${v.r}m, location accuracy ±${Math.round(ac)}m). Move closer and try again — or, if you are already at the office, use "Check in anyway" below and your manager will confirm it.`);
+      logLocFail(user,{lat:la,lng:lo,ac:Math.round(ac)},v).catch(()=>{});
+      setStep("err");
     };
 
     // Keep listening for positions and take the first good one, rather than
     // waiting for one long request to time out. Readings improve over time, so
     // we also keep the best so far and use it if nothing better arrives.
+    // Readings arrive from two sources: the GPS chip (precise, slow, often never
+    // indoors) and the network/cell fix (rough, fast, almost always available).
+    // We take whichever first PROVES the person is at their office, rather than
+    // waiting for a precision the office's own radius does not require.
     const search=()=>{
       let done=false,best=null,watchId=null,ticker=null,secs=0;
-      const GOOD=120, MAX_WAIT=28;
+      const MAX_WAIT=35;
       const stop=()=>{ if(watchId!==null)navigator.geolocation.clearWatch(watchId); if(ticker)clearInterval(ticker); };
       const finishOk=(p)=>{ if(done)return; done=true; stop(); evaluate(p.lat,p.lng,p.ac); };
       const finishErr=(code)=>{
@@ -1244,23 +1297,35 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         const msgs={
           1:"Location permission is blocked. Open your browser settings, then Site settings, then Location, and allow this site. Then try again.",
           2:"Your phone could not provide a location. Check that Location is switched on in your quick settings, then try again.",
-          3:"Could not get a location fix. Step outside or near a window and try again — or use WFH if you are working remotely."};
+          3:"Your phone could not give a location at all. If you are at the office, use \"Check in anyway\" below and your manager will confirm it."};
         setLocErr(msgs[code]||"Could not get your location. Please try again.");
+        logLocFail(user,null,{kind:"nofix",code}).catch(()=>{});
         setStep("err");
       };
       const take=(pos)=>{
+        if(done)return;
         const cand={lat:pos.coords.latitude,lng:pos.coords.longitude,ac:Math.round(pos.coords.accuracy||9999)};
         if(!best||cand.ac<best.ac)best=cand;
         setLocWait(w=>({secs:w.secs,acc:best.ac}));
-        if(cand.ac<=GOOD)finishOk(cand);
+        // Conclusive for this person's office — no reason to keep waiting
+        if(verdict(cand.lat,cand.lng,cand.ac).kind==="sure")finishOk(cand);
       };
-      // a recent cached position gets us going immediately if there is one
-      navigator.geolocation.getCurrentPosition(take,()=>{},{enableHighAccuracy:false,timeout:4000,maximumAge:300000});
+      // A cached or network fix answers in milliseconds indoors, where the GPS
+      // chip may never lock. Ask repeatedly, loosening what we will accept.
+      const coarse=(maxAge,ms)=>{
+        if(done)return;
+        try{ navigator.geolocation.getCurrentPosition(take,()=>{},
+          {enableHighAccuracy:false,timeout:ms,maximumAge:maxAge}); }catch{}
+      };
+      coarse(300000,5000);                       // anything from the last 5 minutes
       watchId=navigator.geolocation.watchPosition(take,
-        e=>{ if(e.code===1)finishErr(1); },
+        e=>{ if(e.code===1)finishErr(1); },      // only a permission block is fatal
         {enableHighAccuracy:true,maximumAge:0,timeout:MAX_WAIT*1000});
       ticker=setInterval(()=>{
         secs++; setLocWait({secs,acc:best?best.ac:null});
+        if(secs===8)coarse(600000,8000);         // GPS is struggling — ask the network
+        if(secs===16)coarse(1800000,8000);       // still nothing — accept an older fix
+        if(secs===26&&!best)coarse(3600000,8000);
         if(secs>=MAX_WAIT){ best?finishOk(best):finishErr(3); }
       },1000);
     };
@@ -1279,18 +1344,29 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     const lb=(!wfh&&sh)?lateBy(new Date().toISOString(),sh.shiftStart):0;
     const lr=leRuleFor(D,user);
     const isLate=lb>lr.lateMins;
+    // An unverified check-in is a normal office day in every respect except that
+    // the location could not be confirmed. Lateness is still measured, and the
+    // real office is recorded — it is never disguised as WFH.
+    const unver=!wfh&&!locSure;
     const rec2={id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
       date:tod(),checkIn:new Date().toISOString(),checkOut:null,
       selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,officeId:wfh?null:(office?.id||null),
-      status:wfh?"wfh":isLate?"late":"present",lateBy:lb,isWFH:wfh};
+      status:wfh?"wfh":isLate?"late":"present",lateBy:lb,isWFH:wfh,
+      ...(unver?{locUnverified:true,locAccuracy:gps?gps.ac:null,
+        locDistance:gps&&office?Math.round(dist(gps.lat,gps.lng,office.lat,office.lng)):null}:{})};
     try{
       // Update live location with check-in GPS so admin sees current location
       if(gps){
         updateLiveLocation(user.id,{lat:gps.lat,lng:gps.lng,ac:gps.ac||0,ts:new Date().toISOString()});
       }
       await addAttendance(rec2);
+      if(unver){
+        const mg=(D.users||[]).find(u=>u.id===user.reportingTo);
+        if(mg)AN(mg.id,`${user.name} checked in at ${office?.name} but the location could not be verified${gps?` (±${gps.ac}m, ${rec2.locDistance}m from the office)`:" — the phone gave no location"}. Please confirm.`,"info");
+      }
       let msg="✅ Checked in!";
       if(wfh)msg="🏠 WFH check-in done!";
+      else if(unver)msg=`✅ Checked in at ${office?.name} — location not verified, sent to your manager`;
       else if(isLate)msg=`⚠️ ${lb}m late — check-in saved`;
       ST(msg);setStep("done");
     }catch(e){
@@ -1470,32 +1546,47 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
               <div style={{textAlign:"center"}}>
                 {selfie&&<img src={selfie} style={{width:90,height:90,borderRadius:"50%",objectFit:"cover",border:`4px solid ${G.gold}`,marginBottom:10}}/>}
                 <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>{wfh?"🏠 Work From Home":`📍 ${office?.name}`}</div>
-                <div style={{color:G.mut,fontSize:12,marginBottom:12}}>{wfh?"WFH":"Location verified ✓"}</div>
+                <div style={{color:wfh||locSure?G.mut:G.am,fontSize:12,marginBottom:12}}>
+                  {wfh?"WFH":locSure?"Location verified ✓":`Location not verified${gps?` · ±${gps.ac}m`:""} — your manager will be asked to confirm`}
+                </div>
                 <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Confirm Check-In ✓</button>
               </div>
             )}
             {step==="err"&&<div style={{textAlign:"center",padding:8}}>
               <div style={{fontSize:32,marginBottom:8}}>🚫</div>
               <p style={{color:G.rd,fontSize:13,marginBottom:12}}>{locErr}</p>
-              {gps&&(()=>{
+              {(()=>{
                 const list=(user.officeIds||[]).map(id=>D.offices.find(o=>o.id===id)).filter(Boolean);
                 return (
                   <div style={{background:G.card2,borderRadius:10,padding:10,marginBottom:12,textAlign:"left",fontSize:11,color:G.mut}}>
                     <div style={{fontWeight:700,color:G.txt,marginBottom:4}}>Location check</div>
-                    <div>You are at {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)} (accuracy ±{gps.ac||"?"}m)</div>
+                    {gps
+                      ?<div>You are at {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)} (accuracy ±{gps.ac||"?"}m)</div>
+                      :<div style={{color:G.am}}>Your phone gave no location at all — not even an approximate one.</div>}
                     {list.length===0
                       ?<div style={{color:G.am}}>Offices linked to you: none</div>
-                      :list.map(o=>(<div key={o.id}>{o.name}: {Math.round(dist(gps.lat,gps.lng,o.lat,o.lng))}m away · allowed {o.radius||200}m</div>))}
+                      :gps
+                        ?list.map(o=>(<div key={o.id}>{o.name}: {Math.round(dist(gps.lat,gps.lng,o.lat,o.lng))}m away · allowed {o.radius||200}m</div>))
+                        :<div>Offices linked to you: {list.map(o=>o.name).join(", ")}</div>}
                     <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${G.bdr}`,color:G.dim,fontSize:10,wordBreak:"break-all"}}>
                       Show this to your admin — account: {user.id} · office codes on your profile: {(user.officeIds||[]).join(", ")||"(none)"} · offices in the system: {(D.offices||[]).length} · app v{APP_VERSION}
                     </div>
-                    <a href={`https://maps.google.com/?q=${gps.lat},${gps.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl,display:"inline-block",marginTop:4}}>Open my position in Google Maps</a>
+                    {gps&&<a href={`https://maps.google.com/?q=${gps.lat},${gps.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl,display:"inline-block",marginTop:4}}>Open my position in Google Maps</a>}
                   </div>
                 );
               })()}
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
                 <button onClick={()=>setStep("idle")} style={{...B(G.gold),color:"#fff",fontWeight:700}}>🔄 Try Again</button>
-                <button onClick={()=>{setWfh(true);setStep("idle");}} style={B(G.bl)}>🏠 Switch to WFH</button>
+                <button onClick={()=>{
+                  const list=(user.officeIds||[]).map(id=>D.offices.find(x=>x.id===id)).filter(Boolean);
+                  if(!list.length){ST("No office is linked to your profile — ask the admin first.","error");return;}
+                  const pick=gps?list.reduce((b,o)=>{const d=dist(gps.lat,gps.lng,o.lat,o.lng);return(!b||d<b.d)?{o,d}:b;},null).o:list[0];
+                  setOffice(pick);setLocSure(false);setStep("confirm");
+                }} style={{...B(G.am),color:"#fff",fontWeight:700}}>📍 Check in anyway — I am at the office</button>
+                <div style={{fontSize:11,color:G.dim,marginTop:-2,textAlign:"left"}}>
+                  Records your real office and time, marked <b>location not verified</b> for your manager to confirm. Your late coming is still counted. Do not use this if you are not at the office.
+                </div>
+                <button onClick={()=>{setWfh(true);setStep("idle");}} style={B(G.bl)}>🏠 I am working from home</button>
               </div>
             </div>}
           </>
@@ -3771,7 +3862,8 @@ function OC({D,P,ST}) {
         </div>
       )}
       {D.offices.map(o=>(
-        <div key={o.id} style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div key={o.id} style={{...K}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m · {(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length} staff</div></div>
           {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
@@ -3782,8 +3874,82 @@ function OC({D,P,ST}) {
               P({...D,offices:D.offices.filter(x=>x.id!==o.id),users:(D.users||[]).map(u=>({...u,officeIds:(u.officeIds||[]).filter(id=>id!==o.id)}))});}} style={{...B(G.card2),border:`1px solid ${G.rd}`,color:G.rd,fontSize:11,padding:"5px 9px"}}>✕</button>
           </div>
         </div>
+        <OfficeHealth o={o} D={D} P={P} ST={ST}/>
+        </div>
       ))}
     </>
+  );
+}
+
+// ── Is this office's pin right? ───────────────────────────────────
+// Refused check-ins are logged with their coordinates. If staff keep being
+// refused from roughly the same spot, roughly the same distance away, the pin
+// is in the wrong place — not the staff in the wrong place.
+function OfficeHealth({o,D,P,ST}) {
+  const [open,setOpen]=useState(false);
+  const since=addDays(tod(),-30);
+  const fails=(D.locFails||[]).filter(f=>f.officeId===o.id&&f.kind==="out"&&f.date>=since&&f.lat!=null);
+  const unver=(D.attendance||[]).filter(a=>a.officeId===o.id&&a.locUnverified&&a.date>=since);
+  const ok=(D.attendance||[]).filter(a=>a.officeId===o.id&&!a.locUnverified&&a.date>=since).length;
+  if(!fails.length&&!unver.length)return null;
+  const med=a=>{const s=[...a].sort((x,y)=>x-y);return s.length?s[Math.floor(s.length/2)]:0;};
+  const mD=Math.round(med(fails.map(f=>f.distance||0)));
+  const spread=fails.length>1
+    ?Math.round(Math.max(...fails.map(f=>dist(f.lat,f.lng,med(fails.map(x=>x.lat)),med(fails.map(x=>x.lng))))))
+    :0;
+  // Tight cluster, consistently outside, several different people => bad pin
+  const people=new Set(fails.map(f=>f.userId)).size;
+  const badPin=fails.length>=3&&people>=2&&mD>(o.radius||200)&&spread<Math.max(400,mD*0.5);
+  const cLat=fails.length?med(fails.map(f=>f.lat)):null, cLng=fails.length?med(fails.map(f=>f.lng)):null;
+  const movePin=()=>{
+    if(cLat==null)return;
+    if(!confirm(`Move "${o.name}" to where staff are actually being refused from?\n\nFrom: ${o.lat}, ${o.lng}\nTo:   ${cLat.toFixed(6)}, ${cLng.toFixed(6)}\n\nCheck this against the map link first.`))return;
+    P({...D,offices:D.offices.map(x=>x.id===o.id?{...x,lat:Number(cLat.toFixed(6)),lng:Number(cLng.toFixed(6))}:x)});
+    ST("Office pin moved — ask one person to try checking in now");
+  };
+  return (
+    <div style={{marginTop:8,borderTop:`1px solid ${G.bdr}`,paddingTop:8}}>
+      <div onClick={()=>setOpen(!open)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+        <div style={{fontSize:12,fontWeight:700,color:badPin?G.rd:G.am}}>
+          {badPin?"⚠ This office's pin looks wrong":"Location problems here"}
+        </div>
+        <div style={{fontSize:11,color:G.dim}}>{fails.length} refused · {unver.length} unverified · {ok} clean {open?"▲":"▼"}</div>
+      </div>
+      {open&&(
+        <div style={{marginTop:8,fontSize:11,color:G.mut}}>
+          {badPin&&(
+            <div style={{background:"#fdeeee",border:`1px solid ${G.rd}44`,borderRadius:8,padding:8,marginBottom:8,color:G.rd}}>
+              {people} different people have been refused here {fails.length} times in 30 days, all from within about {spread}m of each other and a median <b>{mD}m</b> from the saved pin (radius {o.radius||200}m). That pattern is a pin in the wrong place, not staff in the wrong place.
+            </div>
+          )}
+          <div style={{marginBottom:6}}>Last 30 days · median distance of refused attempts: <b>{mD}m</b> · allowed {o.radius||200}m</div>
+          {cLat!=null&&(
+            <div style={{marginBottom:8}}>
+              <a href={`https://maps.google.com/?q=${cLat},${cLng}`} target="_blank" rel="noreferrer" style={{color:G.bl}}>Where staff actually are</a>
+              {" · "}
+              <a href={`https://maps.google.com/?q=${o.lat},${o.lng}`} target="_blank" rel="noreferrer" style={{color:G.bl}}>Where the pin is</a>
+            </div>
+          )}
+          {fails.slice(-6).reverse().map(f=>(
+            <div key={f.id} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderTop:`1px solid ${G.bdr}`}}>
+              <span>{f.userName} · {fD(f.date)}</span>
+              <span style={{color:G.dim}}>{f.distance}m · ±{f.ac}m</span>
+            </div>
+          ))}
+          {cLat!=null&&(
+            <div style={{display:"flex",gap:8,marginTop:10}}>
+              <button onClick={movePin} style={{...B(G.am),flex:1,fontSize:11,color:"#fff"}}>Move pin here</button>
+              <button onClick={()=>{
+                const r=Math.max((o.radius||200),Math.ceil((mD+100)/100)*100);
+                if(!confirm(`Widen "${o.name}" from ${o.radius||200}m to ${r}m?`))return;
+                P({...D,offices:D.offices.map(x=>x.id===o.id?{...x,radius:r}:x)});ST(`Radius widened to ${r}m`);
+              }} style={{...B(G.card2),flex:1,fontSize:11,border:`1px solid ${G.bdr}`}}>Widen radius</button>
+            </div>
+          )}
+          <div style={{marginTop:6,fontSize:10,color:G.dim}}>Check the two map links before moving anything. Widening the radius hides the problem rather than fixing it — only do it if the pin is genuinely right.</div>
+        </div>
+      )}
+    </div>
   );
 }
 

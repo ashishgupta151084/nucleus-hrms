@@ -205,6 +205,20 @@ export const onWorkApprovals = (cb) => onSnapshot(
   snap => cb(snap.docs.map(d => d.data()))
 );
 
+// ── Location failures ─────────────────────────────────────────────
+// Every refused or failed check-in attempt, so a wrong office pin shows up as a
+// tight cluster of failures all the same distance from it, instead of as a
+// stream of staff complaints.
+export const addLocFail = async (rec) => {
+  try { await setDoc(doc(db, 'locFails', rec.id), { ...rec, at: serverTimestamp() }); }
+  catch (e) { console.warn('locFail not logged:', e.message); }
+};
+export const onLocFails = (cb) => onSnapshot(
+  collection(db, 'locFails'),
+  snap => cb(snap.docs.map(d => d.data())),
+  err => { console.warn('locFails listener:', err.message); cb([]); }
+);
+
 // ── On Duty (OD) ──────────────────────────────────────────────────
 export const addOD = async (rec) => {
   await setDoc(doc(db, 'odRequests', rec.id), { ...rec, updatedAt: serverTimestamp() });
