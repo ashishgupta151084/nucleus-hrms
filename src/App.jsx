@@ -301,6 +301,11 @@ const logLocFail=async(user,gps,v)=>{
     kind:v.kind,                                   // "out" or "nofix"
     officeId:v.o?.id||null,officeName:v.o?.name||null,
     distance:v.d!=null?Math.round(v.d):null,radius:v.r!=null?v.r:null,
+    // What the phone itself reported. Without this an admin cannot tell a
+    // switched-off phone from a weak signal, which is the whole diagnosis.
+    code:v.code!=null?v.code:null,
+    seen:v.seen||null,
+    detail:v.detail||null,
     appVersion:APP_VERSION
   });
 };
@@ -569,7 +574,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-10-14";
+const APP_VERSION="2026-10-17";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -1222,6 +1227,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const [locSure,setLocSure]=useState(true);      // false = inside only after allowing for GPS error
+  const [locDiag,setLocDiag]=useState(null);      // what the phone actually reported, for the staff and the admin
   const [pingBusy,setPingBusy]=useState(false),[showPunch,setShowPunch]=useState(false);
   // An OD record is not a normal check-in, so it must not drive the punch card
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod()&&!a.isOD);
@@ -1290,16 +1296,22 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
     const search=()=>{
       let done=false,best=null,watchId=null,ticker=null,secs=0;
       const MAX_WAIT=35;
+      // What the phone told us. Never discard this: an ignored error code is why
+      // "no location at all" used to take 35 seconds and explain nothing.
+      const seen={1:0,2:0,3:0,0:0};
+      let lastMsg="";
       const stop=()=>{ if(watchId!==null)navigator.geolocation.clearWatch(watchId); if(ticker)clearInterval(ticker); };
-      const finishOk=(p)=>{ if(done)return; done=true; stop(); evaluate(p.lat,p.lng,p.ac); };
+      const finishOk=(p)=>{ if(done)return; done=true; stop(); setLocDiag(null); evaluate(p.lat,p.lng,p.ac); };
       const finishErr=(code)=>{
         if(done)return; done=true; stop();
         const msgs={
-          1:"Location permission is blocked. Open your browser settings, then Site settings, then Location, and allow this site. Then try again.",
-          2:"Your phone could not provide a location. Check that Location is switched on in your quick settings, then try again.",
-          3:"Your phone could not give a location at all. If you are at the office, use \"Check in anyway\" below and your manager will confirm it."};
-        setLocErr(msgs[code]||"Could not get your location. Please try again.");
-        logLocFail(user,null,{kind:"nofix",code}).catch(()=>{});
+          1:"Location is blocked for this app. In Chrome: tap the ⋮ menu → Settings → Site settings → Location → allow nucleus-hrms.web.app. Then tap Try Again.",
+          2:"Your phone says location is switched off or unavailable. This is a phone setting, not the app. Check all three, in order: (1) swipe down and turn Location ON; (2) Settings → Location → Google Location Accuracy → ON; (3) Settings → Apps → Chrome → Permissions → Location → Allow. Then tap Try Again.",
+          3:"Your phone kept searching but never found a position in 35 seconds. Move near a window or step outside and tap Try Again. If you are at the office, use \"Check in anyway\" below.",
+          0:"Could not get your location. Please try again."};
+        setLocErr(msgs[code]||msgs[0]);
+        setLocDiag({code,seen:{...seen},lastMsg,secs});
+        logLocFail(user,null,{kind:"nofix",code,seen:{...seen},detail:lastMsg}).catch(()=>{});
         setStep("err");
       };
       const take=(pos)=>{
@@ -1310,23 +1322,34 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
         // Conclusive for this person's office — no reason to keep waiting
         if(verdict(cand.lat,cand.lng,cand.ac).kind==="sure")finishOk(cand);
       };
+      // Every failure is recorded and acted on. A blocked permission or a phone
+      // reporting "location unavailable" is answered at once instead of after 35s,
+      // because waiting cannot change either of them.
+      const fail=(e)=>{
+        if(done)return;
+        const c=e&&e.code?e.code:0;
+        seen[c]=(seen[c]||0)+1;
+        if(e&&e.message)lastMsg=String(e.message).slice(0,140);
+        setLocWait(w=>({...w,err:c}));
+        if(c===1)return finishErr(1);                      // blocked: waiting is pointless
+        if(c===2&&!best&&seen[2]>=2)return finishErr(2);   // phone says location is off
+      };
       // A cached or network fix answers in milliseconds indoors, where the GPS
       // chip may never lock. Ask repeatedly, loosening what we will accept.
       const coarse=(maxAge,ms)=>{
         if(done)return;
-        try{ navigator.geolocation.getCurrentPosition(take,()=>{},
-          {enableHighAccuracy:false,timeout:ms,maximumAge:maxAge}); }catch{}
+        try{ navigator.geolocation.getCurrentPosition(take,fail,
+          {enableHighAccuracy:false,timeout:ms,maximumAge:maxAge}); }catch(e){ fail(e); }
       };
       coarse(300000,5000);                       // anything from the last 5 minutes
-      watchId=navigator.geolocation.watchPosition(take,
-        e=>{ if(e.code===1)finishErr(1); },      // only a permission block is fatal
+      watchId=navigator.geolocation.watchPosition(take,fail,
         {enableHighAccuracy:true,maximumAge:0,timeout:MAX_WAIT*1000});
       ticker=setInterval(()=>{
-        secs++; setLocWait({secs,acc:best?best.ac:null});
+        secs++; setLocWait(w=>({...w,secs,acc:best?best.ac:null}));
         if(secs===8)coarse(600000,8000);         // GPS is struggling — ask the network
         if(secs===16)coarse(1800000,8000);       // still nothing — accept an older fix
         if(secs===26&&!best)coarse(3600000,8000);
-        if(secs>=MAX_WAIT){ best?finishOk(best):finishErr(3); }
+        if(secs>=MAX_WAIT){ best?finishOk(best):finishErr(seen[2]&&!seen[3]?2:3); }
       },1000);
     };
 
@@ -1563,6 +1586,22 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
                     {gps
                       ?<div>You are at {gps.lat.toFixed(5)}, {gps.lng.toFixed(5)} (accuracy ±{gps.ac||"?"}m)</div>
                       :<div style={{color:G.am}}>Your phone gave no location at all — not even an approximate one.</div>}
+                    {locDiag&&(()=>{
+                      const what={1:"PERMISSION DENIED — location is blocked for this site or for Chrome",
+                        2:"POSITION UNAVAILABLE — the phone's location service is off or cannot answer",
+                        3:"TIMED OUT — the phone searched but never found a position",
+                        0:"no reason given"}[locDiag.code];
+                      const n=(locDiag.seen[1]||0)+(locDiag.seen[2]||0)+(locDiag.seen[3]||0);
+                      return (
+                        <div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${G.bdr}`}}>
+                          <div style={{fontWeight:700,color:locDiag.code===3?G.am:G.rd}}>Your phone reported: {what}</div>
+                          <div style={{color:G.dim}}>
+                            after {locDiag.secs}s · {n} refusal{n===1?"":"s"} from {Object.entries(locDiag.seen).filter(([,v])=>v>0).map(([k,v])=>`code ${k}×${v}`).join(", ")||"no reply at all"}
+                            {locDiag.lastMsg?` · "${locDiag.lastMsg}"`:""}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {list.length===0
                       ?<div style={{color:G.am}}>Offices linked to you: none</div>
                       :gps
