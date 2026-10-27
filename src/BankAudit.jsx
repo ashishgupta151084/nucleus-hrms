@@ -58,9 +58,17 @@ const mLabel = m => m ? `${MN[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}` : ""
 const dLabel = d => d ? `${Number(d.slice(8, 10))} ${MN[Number(d.slice(5, 7)) - 1]}` : "—";
 const daysBetween = (a, b) => Math.round((new Date(b + "T12:00:00") - new Date(a + "T12:00:00")) / 86400000);
 const fyStart = m => Number(m.slice(5, 7)) >= 4 ? `${m.slice(0, 4)}-04` : `${Number(m.slice(0, 4)) - 1}-04`;
-const dueDate = m => `${addMonth(m, 1)}-${pad(REPORT_DUE_DAY)}`;
-// Banks close on Sundays and the 2nd and 4th Saturdays. An entry on such a day still counts.
-const bankOff = ds => { const d = new Date(ds + "T12:00:00"), w = d.getDay(); if (w === 0) return true; if (w !== 6) return false; const k = Math.ceil(d.getDate() / 7); return k === 2 || k === 4; };
+// Banks close on Sundays and the 2nd and 4th Saturdays, plus the holidays in the
+// unit's HRMS holiday calendar (e.g. BFSI Rajasthan, BFSI Haryana).
+// An entry made on such a day still counts; the day is just never flagged as missing.
+const weekendOff = ds => { const d = new Date(ds + "T12:00:00"), w = d.getDay(); if (w === 0) return "Sunday"; if (w !== 6) return null; const k = Math.ceil(d.getDate() / 7); return k === 2 ? "2nd Saturday" : k === 4 ? "4th Saturday" : null; };
+const offReason = (ds, hols) => weekendOff(ds) || hols?.get(ds) || null;
+const isOff = (ds, hols) => !!offReason(ds, hols);
+const DEFAULT_CAL = "cal_default"; // same fallback HRMS uses for holidays saved without a calendar
+const holidaysFor = (D, calId) => new Map(calId ? (D.holidays || []).filter(h => (h.calendarId || DEFAULT_CAL) === calId).map(h => [h.date, h.name]) : []);
+const addDay = (ds, n) => { const d = new Date(ds + "T12:00:00"); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+// Final report: 10th of the next month. If that is a holiday, the last working day BEFORE it.
+const dueDate = (m, hols) => { let d = `${addMonth(m, 1)}-${pad(REPORT_DUE_DAY)}`; for (let i = 0; i < 15 && isOff(d, hols); i++) d = addDay(d, -1); return d; };;
 const tsText = ts => {
   if (!ts) return "";
   const d = ts.toDate ? ts.toDate() : new Date(ts);
@@ -92,8 +100,8 @@ const stageInfo = (bank, k) => {
   return { label: st[i]?.label || k, idx: i };
 };
 
-const cycleStatus = (c, m, td) => {
-  const due = dueDate(m);
+const cycleStatus = (c, m, td, unit) => {
+  const due = dueDate(m, unit?.hols);
   if (c?.finalDate) return { label: `Final ${dLabel(c.finalDate)}`, tone: c.finalDate > due ? "late" : "ok", due };
   const left = daysBetween(td, due);
   if (td < `${addMonth(m, 1)}-01`) return { label: "Month in progress", tone: "neutral", due };
@@ -115,7 +123,8 @@ export default function BankAudit({ user, D, ST, AN, setSc, setup, ui }) {
   useEffect(() => onAuditCycles(setCycles), []);
 
   const units = useMemo(() => (setup?.units || []).slice().sort((a, b) =>
-    ((a.order ?? 99) - (b.order ?? 99)) || a.name.localeCompare(b.name)), [setup]);
+    ((a.order ?? 99) - (b.order ?? 99)) || a.name.localeCompare(b.name))
+    .map(u => ({ ...u, hols: holidaysFor(D, u.calendarId) })), [setup, D.holidays]);
   const active = units.filter(u => u.active !== false);
   const by = { id: user.id, name: user.name };
   const back = () => setSc(["admin", "hr"].includes(user.role) ? "dash" : "home");
@@ -182,7 +191,7 @@ const unitMonthObs = (daily, unit, m, td) => {
   const started = !unit.startMonth || m >= unit.startMonth;
   // Days are expected only from the unit's "daily entries from" date, so going live mid-month doesn't flag the past
   const from = unit.dailyFrom || (unit.startMonth ? `${unit.startMonth}-01` : "");
-  const missing = !started || unit.active === false ? [] : daysOf(m).filter(ds => ds < td && ds >= from && !bankOff(ds) && !byDate[ds]);
+  const missing = !started || unit.active === false ? [] : daysOf(m).filter(ds => ds < td && ds >= from && !isOff(ds, unit.hols) && !byDate[ds]);
   const last = recs.slice().sort((a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0))[0];
   const lastDate = recs.map(r => r.date).sort().pop();
   return { recs, byDate, total, missing, last, lastDate };
@@ -201,7 +210,7 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
     const o = unitMonthObs(daily, u, month, td);
     const c = cycles.find(x => x.id === `${u.id}_${month}`);
     const svs = svSlots(u.bank, month).map(s => ({ ...s, date: c?.sv?.[s.k] || "", overdue: !c?.sv?.[s.k] && td > s.to }));
-    return { u, o, c, svs, fy: fyObs(daily, u, month), cs: cycleStatus(c, month, td) };
+    return { u, o, c, svs, fy: fyObs(daily, u, month), cs: cycleStatus(c, month, td, u) };
   });
   const isCur = month === thisMonth();
   const updatedToday = active.filter(u => daily.some(d => d.unitId === u.id && d.date === td)).length;
@@ -216,6 +225,11 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
   const outstanding = open.reduce((s, r) => s + (r.rec?.total || 0), 0);
   const notRaised = inv.filter(r => r.stage === "not_raised" && r.month < thisMonth()).length;
   const days = daysOf(month);
+  // Day being reviewed in the observations panel: today in the current month, else the
+  // latest day of the month that has entries. Tapping a cell in the grid changes it.
+  const lastWithData = daily.filter(d => d.date?.startsWith(month)).map(d => d.date).sort().pop();
+  const [rv, setRv] = useState(null);
+  const reviewDate = rv && rv.startsWith(month) ? rv : (isCur ? td : lastWithData || `${month}-01`);
 
   const exportMis = () => {
     const head = ["Bank", "Unit", "Month", "Observations (month)", "Observations (FY)", "Days missing", "Missing dates", ...["SV 1", "SV 2"], "Report shared", "Response received", "Final published", "Final due", "Status", "Last updated by", "Last updated at"];
@@ -224,18 +238,22 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
       r.c?.reportSharedDate || "", r.c?.responseDate || "", r.c?.finalDate || "", r.cs.due, r.cs.label,
       r.o.last?.updatedByName || r.c?.updatedByName || "", tsText(r.o.last?.updatedAt || r.c?.updatedAt)]);
     const head2 = ["Bank", "Unit", ...days.map(d => d.slice(8))];
-    const body2 = rows.map(r => [BANKS[r.u.bank].short, r.u.name, ...days.map(d => { const x = r.o.byDate[d]; return x ? (x.status === "off" ? "off" : x.obs) : (d < td && !bankOff(d) ? "MISSING" : ""); })]);
-    csvDownload(`Audit_MIS_${month}.csv`, [head, ...body, [], ["Daily observation grid"], head2, ...body2]);
+    const body2 = rows.map(r => [BANKS[r.u.bank].short, r.u.name, ...days.map(d => { const x = r.o.byDate[d]; return x ? (x.status === "off" ? "off" : x.obs) : (d < td && !isOff(d, r.u.hols) ? "MISSING" : offReason(d, r.u.hols) && !weekendOff(d) ? offReason(d, r.u.hols) : ""); })]);
+    const head3 = ["Date", "Bank", "Unit", "Status", "Count", "Shared with branch", "Observations", "Entered by", "Entered at"];
+    const body3 = daily.filter(x => x.date?.startsWith(month) && active.some(u => u.id === x.unitId))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.unitId.localeCompare(b.unitId))
+      .map(x => { const u = active.find(v => v.id === x.unitId); return [x.date, BANKS[u.bank].short, u.name, x.status === "off" ? "No audit" : "Audit done", x.status === "off" ? "" : x.obs, x.sharedDate || "", x.observations ?? x.remarks ?? "", x.updatedByName, tsText(x.updatedAt)]; });
+    csvDownload(`Audit_MIS_${month}.csv`, [head, ...body, [], ["Daily observation grid"], head2, ...body2, [], ["Observations log"], head3, ...body3]);
   };
 
   return (
     <>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        {isCur && <Tile G={G} K={K} label="Updated today" value={`${updatedToday}/${active.length}`} color={updatedToday < active.length ? G.am : G.gr} sub={bankOff(td) ? "Bank holiday today" : "units with today's entry"} />}
+        {isCur && <Tile G={G} K={K} label="Updated today" value={`${updatedToday}/${active.length}`} color={updatedToday < active.length ? G.am : G.gr} sub={active.length && active.every(u => isOff(td, u.hols)) ? "Bank holiday today" : "units with today's entry"} />}
         <Tile G={G} K={K} label={`Observations · ${mLabel(month)}`} value={obsTotal} sub={`${active.length} units`} />
         <Tile G={G} K={K} label="Missing daily entries" value={missingTotal} color={missingTotal ? G.rd : G.gr} sub="working days with no update" />
         <Tile G={G} K={K} label="SV overdue" value={svOverdue} color={svOverdue ? G.rd : G.gr} />
-        <Tile G={G} K={K} label="Final reports" value={`${finals}/${active.length}`} color={overdueReports ? G.rd : G.txt} sub={overdueReports ? `${overdueReports} overdue (due ${dLabel(dueDate(month))})` : `due ${dLabel(dueDate(month))}`} />
+        <Tile G={G} K={K} label="Final reports" value={`${finals}/${active.length}`} color={overdueReports ? G.rd : G.txt} sub={(() => { const ds = [...new Set(rows.map(r => r.cs.due))].sort(); const when = ds.length === 1 ? dLabel(ds[0]) : `${dLabel(ds[0])}–${dLabel(ds[ds.length - 1])}`; return overdueReports ? `${overdueReports} overdue (due ${when})` : `due ${when}`; })()} />
         <Tile G={G} K={K} label="Invoices outstanding" value={inr(outstanding)} sub={`${open.length} unpaid · ${notRaised} not raised`} color={notRaised ? G.am : G.txt} />
       </div>
 
@@ -279,7 +297,7 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
         <div style={{ padding: "12px 14px", borderBottom: `1px solid ${G.bdr}`, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
           <div style={{ fontWeight: 800 }}>Daily observations · {mLabel(month)}</div>
           <div style={{ fontSize: 11, color: G.mut, display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <span><b style={{ color: G.rd }}>!</b> missing</span><span style={{ color: G.dim }}>· bank holiday</span><span>off = no audit</span>
+            <span><b style={{ color: G.rd }}>!</b> missing</span><span style={{ color: G.dim }}>· Sun / 2nd–4th Sat</span><span style={{ color: G.dim }}>H holiday (hover for name)</span><span>off = no audit</span>
           </div>
         </div>
         <div style={{ overflowX: "auto" }}>
@@ -287,7 +305,7 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
             <thead>
               <tr>
                 <th style={{ position: "sticky", left: 0, background: G.card, padding: "6px 10px", textAlign: "left", minWidth: 150, zIndex: 1 }}>Unit</th>
-                {days.map(d => <th key={d} style={{ padding: "6px 0", width: 26, minWidth: 26, color: bankOff(d) ? G.dim : G.mut, fontWeight: 700, background: d === td ? "#fff3cd" : "transparent" }}>{Number(d.slice(8))}</th>)}
+                {days.map(d => <th key={d} style={{ padding: "6px 0", width: 26, minWidth: 26, color: weekendOff(d) ? G.dim : G.mut, fontWeight: 700, background: d === td ? "#fff3cd" : "transparent" }}>{Number(d.slice(8))}</th>)}
                 <th style={{ padding: "6px 10px" }}>Total</th>
               </tr>
             </thead>
@@ -298,12 +316,13 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
                   {days.map(d => {
                     const x = r.o.byDate[d];
                     const miss = r.o.missing.includes(d);
-                    const off = bankOff(d);
+                    const why = offReason(d, r.u.hols);
+                    const off = !!why;
                     const n = x && x.status !== "off" ? Number(x.obs) || 0 : null;
                     const bg = miss ? "#fde2e1" : x?.status === "off" ? G.card2 : n ? `rgba(22,98,196,${Math.min(0.12 + n * 0.08, 0.6)})` : off ? "#f3f4f8" : "transparent";
-                    return <td key={d} title={x ? `${dLabel(d)}: ${x.status === "off" ? "no audit" : n + " obs"} · by ${x.updatedByName}` : dLabel(d)}
-                      style={{ textAlign: "center", padding: "6px 0", background: bg, color: miss ? G.rd : n > 4 ? "#fff" : G.txt, fontWeight: miss || n ? 800 : 400, borderLeft: `1px solid ${G.bdr}` }}>
-                      {miss ? "!" : x?.status === "off" ? "off" : n !== null ? n : off ? "·" : ""}
+                    return <td key={d} onClick={() => setRv(d)} title={(x ? `${dLabel(d)}: ${x.status === "off" ? "no audit" : n + " obs"} · by ${x.updatedByName}` : dLabel(d)) + (why ? ` · ${why}` : "")}
+                      style={{ textAlign: "center", padding: "6px 0", background: bg, color: miss ? G.rd : n > 4 ? "#fff" : G.txt, fontWeight: miss || n ? 800 : 400, borderLeft: `1px solid ${G.bdr}`, cursor: "pointer", outline: d === reviewDate ? `2px solid ${G.navy}` : "none", outlineOffset: -2 }}>
+                      {miss ? "!" : x?.status === "off" ? "off" : n !== null ? n : off ? (weekendOff(d) ? "·" : "H") : ""}
                     </td>;
                   })}
                   <td style={{ padding: "6px 10px", fontWeight: 900 }}>{r.o.total}</td>
@@ -311,6 +330,38 @@ function MIS({ G, B, K, active, daily, cycles, invoices, month, units }) {
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div style={{ ...K }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontWeight: 800 }}>Observations for review · {dLabel(reviewDate)}</div>
+            <div style={{ fontSize: 11, color: G.mut }}>Tap any day in the grid above to see its observations.</div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={() => setRv(addDay(reviewDate, -1))} disabled={reviewDate <= `${month}-01`} style={{ ...B(G.card), border: `1px solid ${G.bdr}`, padding: "6px 12px", fontSize: 12 }}>← Prev day</button>
+            <button onClick={() => setRv(addDay(reviewDate, 1))} disabled={reviewDate >= `${month}-${pad(lastDay(month))}` || reviewDate >= td} style={{ ...B(G.card), border: `1px solid ${G.bdr}`, padding: "6px 12px", fontSize: 12 }}>Next day →</button>
+          </div>
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {rows.map(r => {
+            const x = r.o.byDate[reviewDate];
+            const why = offReason(reviewDate, r.u.hols);
+            const text = x ? (x.observations ?? x.remarks ?? "") : "";
+            return (
+              <div key={r.u.id} style={{ borderTop: `1px solid ${G.bdr}`, paddingTop: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "baseline" }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}><b>{r.u.name}</b><BankChip bank={r.u.bank} G={G} />
+                    {x && x.status !== "off" && <span style={{ fontSize: 12, fontWeight: 800 }}>{x.obs} obs</span>}</div>
+                  <div style={{ fontSize: 11, color: G.dim }}>{x ? <>by <b>{x.updatedByName}</b> · {tsText(x.updatedAt)}{x.status !== "off" && (x.sharedDate ? ` · shared ${dLabel(x.sharedDate)}` : " · not shared yet")}</> : ""}</div>
+                </div>
+                <div style={{ fontSize: 13, marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: x ? G.txt : r.o.missing.includes(reviewDate) ? G.rd : G.dim }}>
+                  {x ? (x.status === "off" ? "No audit this day." : text || (x.obs ? "Count entered, observations not written." : "No observations.")) : r.o.missing.includes(reviewDate) ? "Not updated." : why ? `Holiday: ${why}` : "No entry."}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </>
@@ -333,7 +384,7 @@ function Daily({ G, K, I, active, daily, month }) {
         </div>
         <input type="date" value={date} max={td} onChange={e => e.target.value && setDate(e.target.value)} style={{ ...I, width: 170 }} />
       </div>
-      {bankOff(date) && <div style={{ ...K, background: "#fff8e6", borderColor: "#f0d48a", fontSize: 12, color: G.am }}>{dLabel(date)} is a Sunday or 2nd/4th Saturday. Enter only if the audit actually ran.</div>}
+      {weekendOff(date) && <div style={{ ...K, background: "#fff8e6", borderColor: "#f0d48a", fontSize: 12, color: G.am }}>{dLabel(date)} is a {weekendOff(date)}. Enter only if the audit actually ran.</div>}
       {active.map(u => <DailyRow key={u.id + date} u={u} date={date} rec={daily.find(d => d.id === `${u.id}_${date}`)} daily={daily} />)}
     </>
   );
@@ -341,7 +392,7 @@ function Daily({ G, K, I, active, daily, month }) {
 
 function DailyRow({ u, date, rec, daily }) {
   const { G, B, I, K, ST, by } = useCtx();
-  const init = () => ({ status: rec?.status || "worked", obs: rec?.obs ?? "", sharedDate: rec?.sharedDate || "", remarks: rec?.remarks || "" });
+  const init = () => ({ status: rec?.status || "worked", obs: rec?.obs ?? "", sharedDate: rec?.sharedDate || "", observations: rec?.observations ?? rec?.remarks ?? "" });
   const [f, setF] = useState(init);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -362,7 +413,7 @@ function DailyRow({ u, date, rec, daily }) {
     try {
       await saveAuditDaily(`${u.id}_${date}`, {
         unitId: u.id, bank: u.bank, date, month: m, status: f.status,
-        obs: f.status === "off" ? 0 : num(f.obs), sharedDate: f.status === "off" ? "" : f.sharedDate, remarks: f.remarks.trim(),
+        obs: f.status === "off" ? 0 : num(f.obs), sharedDate: f.status === "off" ? "" : f.sharedDate, observations: f.status === "off" ? "" : f.observations.trim(),
       }, by, rec ? "edited" : "entered");
       setDirty(false); ST(`✅ ${u.name} saved`);
     } catch (e) { ST("Save failed: " + e.message, "error"); }
@@ -370,11 +421,12 @@ function DailyRow({ u, date, rec, daily }) {
   };
   const off = f.status === "off";
   return (
-    <div style={{ ...K, borderLeft: `4px solid ${rec ? G.gr : date < today() && !bankOff(date) ? G.rd : G.bdr}` }}>
+    <div style={{ ...K, borderLeft: `4px solid ${rec ? G.gr : date < today() && !isOff(date, u.hols) ? G.rd : G.bdr}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ fontWeight: 800 }}>{u.name}</span><BankChip bank={u.bank} G={G} /></div>
         <div style={{ fontSize: 12, color: G.mut }}>Month to date: <b style={{ color: G.txt, fontSize: 14 }}>{cum}</b></div>
       </div>
+      {u.hols.get(date) && !rec && <div style={{ fontSize: 12, color: G.am, fontWeight: 700, marginBottom: 8 }}>Holiday: {u.hols.get(date)}. No entry needed unless the audit ran.</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div style={{ flex: "1 1 130px" }}>
           <label style={ui_L}>Status</label>
@@ -393,8 +445,11 @@ function DailyRow({ u, date, rec, daily }) {
         </div>
       </div>
       <div style={{ marginTop: 8 }}>
-        <label style={ui_L}>Remarks (optional)</label>
-        <input style={I} value={f.remarks} maxLength={200} onChange={e => set({ remarks: e.target.value })} placeholder="Area or category only. No customer names or account numbers." />
+        <label style={ui_L}>Observations</label>
+        <textarea style={{ ...I, minHeight: 110, resize: "vertical", lineHeight: 1.5, opacity: off ? 0.4 : 1 }} disabled={off} value={off ? "" : f.observations}
+          onChange={e => set({ observations: e.target.value })}
+          placeholder={"One observation per line, e.g.\n1. KYC not updated for 3 SB accounts opened this week\n2. Cash retention limit exceeded on 26 Oct"} />
+        {!off && f.observations.trim() && <div style={{ fontSize: 11, color: G.dim, marginTop: 3 }}>{f.observations.trim().split(/\n+/).filter(Boolean).length} line(s) written</div>}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, gap: 8, flexWrap: "wrap" }}>
         <div>{rec ? <Stamp rec={rec} G={G} /> : <div style={{ fontSize: 11, color: G.dim }}>Not entered yet</div>}
@@ -412,7 +467,7 @@ function Cycle({ G, K, active, cycles, month }) {
   return (
     <>
       <div style={{ ...K, fontSize: 12, color: G.mut }}>
-        <b style={{ color: G.txt }}>{mLabel(month)}</b> · IndusInd needs two surprise verifications (one each fortnight), ICICI one. Final report is due by <b style={{ color: G.txt }}>{dLabel(dueDate(month))} {dueDate(month).slice(0, 4)}</b>.
+        <b style={{ color: G.txt }}>{mLabel(month)}</b> · IndusInd needs two surprise verifications (one each fortnight), ICICI one. Final report is due on the 10th of {mLabel(addMonth(month, 1))}; if that is a holiday for the unit, on the last working day before it.
       </div>
       {active.filter(u => !u.startMonth || month >= u.startMonth).map(u => <CycleCard key={u.id + month} u={u} m={month} rec={cycles.find(c => c.id === `${u.id}_${month}`)} />)}
     </>
@@ -429,7 +484,7 @@ function CycleCard({ u, m, rec }) {
   useEffect(() => { if (!dirty) setF(init()); }, [rec?.updatedAt?.seconds]);
   const set = p => { setF(x => ({ ...x, ...p })); setDirty(true); };
   const td = today();
-  const cs = cycleStatus({ finalDate: f.finalDate }, m, td);
+  const cs = cycleStatus({ finalDate: f.finalDate }, m, td, u);
   const save = async () => {
     for (const s of slots) {
       const v = f.sv[s.k];
@@ -566,11 +621,11 @@ function Invoices({ G, B, I, K, units, invoices }) {
   const nr = all.filter(r => r.stage === "not_raised" && r.month < cur).length;
 
   const exportInv = () => {
-    const head = ["Bank", "Unit", "Audit month", "Invoice no", "Invoice date", "Fee (taxable)", "GST", "Invoice total", "Status", "Assigned to", "Bank request no", "Submitted/mailed on", "Paid on", "Amount received", "TDS deducted", "UTR", "Age (days)", "Last updated by", "Last updated at"];
+    const head = ["Bank", "Unit", "Audit month", "Invoice no", "Invoice date", "Fee (taxable)", "GST", "Invoice total", "Status", "Bank request no", "Submitted/mailed on", "Paid on", "Amount received", "TDS deducted", "UTR", "Age (days)", "Last updated by", "Last updated at"];
     const body = all.sort((a, b) => a.month.localeCompare(b.month)).map(r => {
       const x = r.rec || {};
       return [BANKS[r.u.bank].short, r.u.name, mLabel(r.month), x.invoiceNo, x.invoiceDate, x.fee, x.gst, x.total, stageInfo(r.u.bank, r.stage).label,
-        x.assignedName, x.requestNo, x.stageDates?.submitted || x.stageDates?.mailed || "", x.paidDate, x.amountReceived, x.tdsDeducted, x.utr, r.age ?? "", x.updatedByName, tsText(x.updatedAt)];
+        x.requestNo, x.stageDates?.submitted || x.stageDates?.mailed || "", x.paidDate, x.amountReceived, x.tdsDeducted, x.utr, r.age ?? "", x.updatedByName, tsText(x.updatedAt)];
     });
     csvDownload(`Audit_Invoices_${td}.csv`, [head, ...body]);
   };
@@ -621,7 +676,7 @@ function InvoiceCard({ r, open, toggle }) {
               {rec?.invoiceNo ? `Inv ${rec.invoiceNo} · ${dLabel(rec.invoiceDate)}` : "No invoice yet"}{rec?.total ? ` · ${inr(rec.total)}` : u.fee ? ` · fee ${inr(u.fee)} + GST` : ""}
               {rec?.requestNo ? ` · Req ${rec.requestNo}` : ""}
             </div>
-            {rec?.assignedName && stage !== "paid" && <div style={{ fontSize: 11, color: G.mut }}>With: <b>{rec.assignedName}</b></div>}
+            {rec?.updatedByName && <div style={{ fontSize: 11, color: G.mut }}>Last update: <b>{rec.updatedByName}</b> · {tsText(rec.updatedAt)}</div>}
           </div>
           <div style={{ textAlign: "right", flexShrink: 0 }}>
             <span style={{ fontSize: 11, fontWeight: 800, color: "#fff", background: color, padding: "3px 9px", borderRadius: 20, whiteSpace: "nowrap" }}>{si.label}</span>
@@ -641,15 +696,13 @@ function InvoiceCard({ r, open, toggle }) {
 }
 
 function InvoiceEditor({ r }) {
-  const { G, B, I, K, ST, AN, by, D } = useCtx();
+  const { G, B, I, ST, by } = useCtx();
   const { u, month, rec, stage } = r;
   const td = today();
-  const team = (D.users || []).filter(x => x.role !== "admin" || x.id === by.id).sort((a, b) => a.name.localeCompare(b.name));
   const stages = BANKS[u.bank].stages;
   const init = () => ({
     invoiceNo: rec?.invoiceNo || "", invoiceDate: rec?.invoiceDate || "",
     fee: rec?.fee ?? u.fee ?? "", gstRate: rec?.gstRate ?? u.gstRate ?? 18, tdsRate: rec?.tdsRate ?? u.tdsRate ?? 10,
-    assignedTo: rec?.assignedTo || "",
     stage: stage === "not_raised" ? "raised" : stage, stageDate: td, note: "",
     requestNo: rec?.requestNo || "", paidDate: rec?.paidDate || "", amountReceived: rec?.amountReceived ?? "", tdsDeducted: rec?.tdsDeducted ?? "", utr: rec?.utr || "",
     returnReason: "",
@@ -675,7 +728,6 @@ function InvoiceEditor({ r }) {
       if (!sd || sd > td) return ST("Enter the date of this status (not in the future)", "error");
       if (sd < f.invoiceDate) return ST("Status date can't be before the invoice date", "error");
     }
-    if (f.stage === "with_team" && !f.assignedTo) return ST("Pick the team member it was shared with", "error");
     if (f.stage === "req_no" && !f.requestNo.trim()) return ST("Enter the bank's request number", "error");
     if (f.stage === "returned" && !f.returnReason.trim()) return ST("Give the reason the bank returned it", "error");
     if (f.stage === "paid") {
@@ -683,11 +735,9 @@ function InvoiceEditor({ r }) {
       if (f.paidDate < f.invoiceDate) return ST("Payment date can't be before the invoice date", "error");
       if (num(f.amountReceived) === null || num(f.amountReceived) <= 0) return ST("Enter the amount received in the bank", "error");
     }
-    const assigned = team.find(x => x.id === f.assignedTo);
     const fields = {
       unitId: u.id, bank: u.bank, unitName: u.name, month,
       invoiceNo: f.invoiceNo.trim(), invoiceDate: f.invoiceDate, fee, gstRate: num(f.gstRate), gst, total, tdsRate: num(f.tdsRate),
-      assignedTo: f.assignedTo || "", assignedName: assigned?.name || "",
       stage: f.stage, stageDates: { [f.stage]: sd },
       requestNo: f.requestNo.trim(),
       ...(f.stage === "paid" ? { paidDate: f.paidDate, amountReceived: num(f.amountReceived), tdsDeducted: num(f.tdsDeducted) || 0, utr: f.utr.trim() } : {}),
@@ -697,10 +747,6 @@ function InvoiceEditor({ r }) {
     setBusy(true);
     try {
       await saveAuditInvoice(`${u.id}_${month}`, fields, by, note);
-      if (f.assignedTo && f.assignedTo !== by.id && (f.assignedTo !== rec?.assignedTo || (f.stage === "with_team" && stage !== "with_team")))
-        AN(f.assignedTo, `${u.name} invoice for ${mLabel(month)} (${f.invoiceNo.trim()}) has been shared with you by ${by.name}. Update its status in Bank Audits.`, "info");
-      if (f.stage === "returned" && rec?.assignedTo && rec.assignedTo !== by.id)
-        AN(rec.assignedTo, `${u.name} invoice ${f.invoiceNo.trim()} was returned by the bank: ${f.returnReason.trim()}`, "error");
       ST("✅ Invoice updated");
       set({ note: "", returnReason: "" });
     } catch (e) { ST("Save failed: " + e.message, "error"); }
@@ -735,12 +781,7 @@ function InvoiceEditor({ r }) {
         {f.stage === "raised" || f.stage === "paid"
           ? <div style={{ ...cell, fontSize: 12, color: G.mut, alignSelf: "center" }}>{f.stage === "raised" ? "Dated on the invoice date" : "Dated on the payment date below"}</div>
           : <div style={cell}><label style={ui_L}>Date of this status</label><input type="date" max={td} min={f.invoiceDate || undefined} style={I} value={f.stageDate} onChange={e => set({ stageDate: e.target.value })} /></div>}
-        <div style={cell}><label style={ui_L}>Team member handling it</label>
-          <select style={I} value={f.assignedTo} onChange={e => set({ assignedTo: e.target.value })}>
-            <option value="">—</option>
-            {team.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
-          </select>
-        </div>
+        <div style={{ ...cell, fontSize: 12, color: G.mut, alignSelf: "center" }}>Saved as updated by <b style={{ color: G.txt }}>{by.name}</b></div>
       </div>
       {(f.stage === "req_no" || (u.bank === "indusind" && rec?.requestNo)) && (
         <div style={{ marginTop: 8 }}><label style={ui_L}>Bank request no</label><input style={I} value={f.requestNo} onChange={e => set({ requestNo: e.target.value })} /></div>
@@ -767,7 +808,7 @@ function InvoiceEditor({ r }) {
         const fl = l.fields || {};
         const st = stageInfo(u.bank, fl.stage).label;
         const d = fl.stageDates ? Object.values(fl.stageDates)[0] : "";
-        return [st && `${st}${d ? ` on ${dLabel(d)}` : ""}`, fl.requestNo && fl.stage === "req_no" && `req ${fl.requestNo}`, fl.assignedName && `with ${fl.assignedName}`, fl.stage === "paid" && `${inr(fl.amountReceived)} recd`].filter(Boolean).join(" · ");
+        return [st && `${st}${d ? ` on ${dLabel(d)}` : ""}`, fl.requestNo && fl.stage === "req_no" && `req ${fl.requestNo}`, fl.stage === "paid" && `${inr(fl.amountReceived)} recd`].filter(Boolean).join(" · ");
       }} />
     </div>
   );
@@ -779,17 +820,21 @@ function InvoiceEditor({ r }) {
 function Setup({ G, B, I, K, ST, by, D, units, setup }) {
   const [busy, setBusy] = useState(false);
   const [add, setAdd] = useState({ bank: "indusind", name: "" });
+  const cals = D.holidayCalendars || [];
+  const calLike = word => cals.find(c => c.name.toLowerCase().includes(word))?.id || "";
+  // Gurgaon/Gurugram units follow the Haryana calendar; the rest are in Rajasthan
+  const guessCal = name => /gurgaon|gurugram/i.test(name) ? calLike("haryana") : calLike("rajasthan");
   const loadDefaults = async () => {
     setBusy(true);
     try {
-      await saveAuditUnits(DEFAULT_UNITS.map(([bank, name], i) => ({ id: gid(), bank, name, fee: null, gstRate: 18, tdsRate: 10, startMonth: thisMonth(), dailyFrom: today(), active: true, order: i })), [], by);
+      await saveAuditUnits(DEFAULT_UNITS.map(([bank, name], i) => ({ id: gid(), bank, name, fee: null, gstRate: 18, tdsRate: 10, startMonth: thisMonth(), dailyFrom: today(), calendarId: guessCal(name), active: true, order: i })), [], by);
       ST("✅ 7 units added. Now enter each unit's fee.");
     } catch (e) { ST("Failed: " + e.message, "error"); }
     setBusy(false);
   };
   const addUnit = async () => {
     if (!add.name.trim()) return ST("Enter the branch / unit name", "error");
-    await saveAuditUnits([{ id: gid(), bank: add.bank, name: add.name.trim(), fee: null, gstRate: 18, tdsRate: 10, startMonth: thisMonth(), dailyFrom: today(), active: true, order: units.length }], [], by)
+    await saveAuditUnits([{ id: gid(), bank: add.bank, name: add.name.trim(), fee: null, gstRate: 18, tdsRate: 10, startMonth: thisMonth(), dailyFrom: today(), calendarId: guessCal(add.name), active: true, order: units.length }], [], by)
       .then(() => { ST("✅ Unit added"); setAdd({ ...add, name: "" }); }).catch(e => ST("Failed: " + e.message, "error"));
   };
   const members = setup?.members || [];
@@ -799,7 +844,7 @@ function Setup({ G, B, I, K, ST, by, D, units, setup }) {
     <>
       <div style={K}>
         <div style={{ fontWeight: 800, marginBottom: 4 }}>Bank units</div>
-        <div style={{ fontSize: 12, color: G.mut, marginBottom: 10 }}>Fee is the monthly taxable fee for that unit; it pre-fills each invoice and can be changed on the invoice. "Invoices from" is the first audit month that should have an invoice. "Daily entries from" is the first day the team must update; days before it are never shown as missing.</div>
+        <div style={{ fontSize: 12, color: G.mut, marginBottom: 10 }}>Fee is the monthly taxable fee for that unit; it pre-fills each invoice and can be changed on the invoice. "Invoices from" is the first audit month that should have an invoice. "Daily entries from" is the first day the team must update; days before it are never shown as missing. "Holiday calendar" is the HRMS calendar for the unit's state; its holidays are never shown as missing and move the final report due date earlier.</div>
         {units.length === 0 && <button onClick={loadDefaults} disabled={busy} style={{ ...B(G.gold), width: "100%", marginBottom: 10, color: "#fff", fontWeight: 800 }}>{busy ? "Adding…" : "Add the 7 units (IndusInd ×4, ICICI ×3)"}</button>}
         {units.map(u => <UnitRow key={u.id} u={u} />)}
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
@@ -825,12 +870,13 @@ function Setup({ G, B, I, K, ST, by, D, units, setup }) {
 }
 
 function UnitRow({ u }) {
-  const { G, B, I, ST, by } = useCtx();
-  const [f, setF] = useState({ name: u.name, fee: u.fee ?? "", startMonth: u.startMonth || thisMonth(), dailyFrom: u.dailyFrom || "", active: u.active !== false });
-  const dirty = f.name !== u.name || String(f.fee) !== String(u.fee ?? "") || f.startMonth !== (u.startMonth || thisMonth()) || f.dailyFrom !== (u.dailyFrom || "") || f.active !== (u.active !== false);
+  const { G, B, I, ST, by, D } = useCtx();
+  const cals = D.holidayCalendars || [];
+  const [f, setF] = useState({ name: u.name, fee: u.fee ?? "", startMonth: u.startMonth || thisMonth(), dailyFrom: u.dailyFrom || "", calendarId: u.calendarId || "", active: u.active !== false });
+  const dirty = f.name !== u.name || String(f.fee) !== String(u.fee ?? "") || f.startMonth !== (u.startMonth || thisMonth()) || f.dailyFrom !== (u.dailyFrom || "") || f.calendarId !== (u.calendarId || "") || f.active !== (u.active !== false);
   const save = () => {
     if (!f.name.trim()) return ST("Name can't be blank", "error");
-    saveAuditUnits([{ id: u.id, name: f.name.trim(), fee: num(f.fee), startMonth: f.startMonth, dailyFrom: f.dailyFrom, active: f.active }], [], by)
+    saveAuditUnits([{ id: u.id, name: f.name.trim(), fee: num(f.fee), startMonth: f.startMonth, dailyFrom: f.dailyFrom, calendarId: f.calendarId, active: f.active }], [], by)
       .then(() => ST(`✅ ${f.name} saved`)).catch(e => ST("Failed: " + e.message, "error"));
   };
   return (
@@ -839,6 +885,12 @@ function UnitRow({ u }) {
       <div style={{ flex: "1 1 100px" }}><label style={ui_L}>Fee / month ₹</label><input type="number" min="0" style={{ ...I, borderColor: f.fee === "" ? G.am : G.bdr }} value={f.fee} onChange={e => setF({ ...f, fee: e.target.value })} placeholder="not set" /></div>
       <div style={{ flex: "1 1 130px" }}><label style={ui_L}>Invoices from</label><input type="month" style={I} value={f.startMonth} onChange={e => e.target.value && setF({ ...f, startMonth: e.target.value })} /></div>
       <div style={{ flex: "1 1 140px" }}><label style={ui_L}>Daily entries from</label><input type="date" style={I} value={f.dailyFrom} onChange={e => setF({ ...f, dailyFrom: e.target.value })} /></div>
+      <div style={{ flex: "1 1 170px" }}><label style={{ ...ui_L, color: f.calendarId ? ui_L.color : G.am }}>Holiday calendar{f.calendarId ? "" : " · not set"}</label>
+        <select style={{ ...I, borderColor: f.calendarId ? G.bdr : G.am }} value={f.calendarId} onChange={e => setF({ ...f, calendarId: e.target.value })}>
+          <option value="">None (Sun + 2nd/4th Sat only)</option>
+          {cals.map(c => <option key={c.id} value={c.id}>{c.name} · {(D.holidays || []).filter(h => (h.calendarId || DEFAULT_CAL) === c.id).length} holidays</option>)}
+        </select>
+      </div>
       <label style={{ fontSize: 12, display: "flex", gap: 4, alignItems: "center", paddingBottom: 12 }}><input type="checkbox" checked={f.active} onChange={e => setF({ ...f, active: e.target.checked })} />Active</label>
       <button onClick={save} disabled={!dirty} style={{ ...B(dirty ? G.gold : G.card2), color: dirty ? "#fff" : G.dim, padding: "10px 14px", marginBottom: 1 }}>Save</button>
     </div>

@@ -54,6 +54,12 @@ export const onAuditDaily = listen('auditDaily');
 export const onAuditCycles = listen('auditCycles');
 
 // Upsert with audit trail. `fields` are the values being set; `note` is optional.
+// Long free text (daily observations) is stored once on the record, not copied into every log entry
+const logFields = (f) => {
+  if (typeof f.observations !== 'string') return f;
+  const { observations, ...rest } = f;
+  return { ...rest, observationsChars: observations.length };
+};
 const upsert = (name) => async (id, fields, by, note = '') => {
   const at = new Date().toISOString();
   const f = clean(fields);
@@ -65,7 +71,7 @@ const upsert = (name) => async (id, fields, by, note = '') => {
     updatedBy: by.id,
     updatedByName: by.name,
     updatedAt: serverTimestamp(),
-    log: arrayUnion({ at, by: by.id, byName: by.name, note: note || '', fields: f }),
+    log: arrayUnion({ at, by: by.id, byName: by.name, note: note || '', fields: logFields(f) }),
   }, { merge: true });
 };
 
