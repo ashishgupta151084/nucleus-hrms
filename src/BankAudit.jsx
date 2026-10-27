@@ -696,7 +696,7 @@ function InvoiceCard({ r, open, toggle }) {
 }
 
 function InvoiceEditor({ r }) {
-  const { G, B, I, ST, by } = useCtx();
+  const { G, B, I, ST, by, invoices } = useCtx();
   const { u, month, rec, stage } = r;
   const td = today();
   const stages = BANKS[u.bank].stages;
@@ -729,18 +729,21 @@ function InvoiceEditor({ r }) {
       if (sd < f.invoiceDate) return ST("Status date can't be before the invoice date", "error");
     }
     if (f.stage === "req_no" && !f.requestNo.trim()) return ST("Enter the bank's request number", "error");
-    if (f.stage === "returned" && !f.returnReason.trim()) return ST("Give the reason the bank returned it", "error");
+    if (f.stage === "returned" && f.returnReason.trim().length < 5) return ST("Enter the reason the bank returned the invoice (required)", "error");
     if (f.stage === "paid") {
       if (!f.paidDate || f.paidDate > td) return ST("Enter the payment date", "error");
       if (f.paidDate < f.invoiceDate) return ST("Payment date can't be before the invoice date", "error");
       if (num(f.amountReceived) === null || num(f.amountReceived) <= 0) return ST("Enter the amount received in the bank", "error");
+      const utr = f.utr.replace(/\s+/g, "").toUpperCase();
+      if (!utr) return ST("Enter the UTR number of the payment (required)", "error");
+      if (!/^[A-Z0-9]{6,22}$/.test(utr)) return ST("UTR should be 6–22 letters or digits, as shown in the bank statement", "error");
     }
     const fields = {
       unitId: u.id, bank: u.bank, unitName: u.name, month,
       invoiceNo: f.invoiceNo.trim(), invoiceDate: f.invoiceDate, fee, gstRate: num(f.gstRate), gst, total, tdsRate: num(f.tdsRate),
       stage: f.stage, stageDates: { [f.stage]: sd },
       requestNo: f.requestNo.trim(),
-      ...(f.stage === "paid" ? { paidDate: f.paidDate, amountReceived: num(f.amountReceived), tdsDeducted: num(f.tdsDeducted) || 0, utr: f.utr.trim() } : {}),
+      ...(f.stage === "paid" ? { paidDate: f.paidDate, amountReceived: num(f.amountReceived), tdsDeducted: num(f.tdsDeducted) || 0, utr: f.utr.replace(/\s+/g, "").toUpperCase() } : {}),
       ...(f.stage === "returned" ? { returnReason: f.returnReason.trim() } : {}),
     };
     const note = [f.stage === "returned" ? `Returned: ${f.returnReason.trim()}` : "", f.note.trim()].filter(Boolean).join(" · ");
@@ -787,7 +790,7 @@ function InvoiceEditor({ r }) {
         <div style={{ marginTop: 8 }}><label style={ui_L}>Bank request no</label><input style={I} value={f.requestNo} onChange={e => set({ requestNo: e.target.value })} /></div>
       )}
       {f.stage === "returned" && (
-        <div style={{ marginTop: 8 }}><label style={ui_L}>Why did the bank return it?</label><input style={I} value={f.returnReason} onChange={e => set({ returnReason: e.target.value })} placeholder="e.g. wrong GSTIN, PO number missing" /></div>
+        <div style={{ marginTop: 8 }}><label style={ui_L}>Reason for return <span style={{ color: G.rd }}>*</span></label><input style={I} value={f.returnReason} onChange={e => set({ returnReason: e.target.value })} placeholder="e.g. wrong GSTIN, PO number missing" /></div>
       )}
       {f.stage === "paid" && (
         <>
@@ -795,8 +798,14 @@ function InvoiceEditor({ r }) {
             <div style={cell}><label style={ui_L}>Paid on</label><input type="date" max={td} style={I} value={f.paidDate} onChange={e => set({ paidDate: e.target.value })} /></div>
             <div style={cell}><label style={ui_L}>Amount received ₹</label><input type="number" min="0" style={I} value={f.amountReceived} onChange={e => set({ amountReceived: e.target.value })} /></div>
             <div style={cell}><label style={ui_L}>TDS deducted ₹</label><input type="number" min="0" style={I} value={f.tdsDeducted} onChange={e => set({ tdsDeducted: e.target.value })} /></div>
-            <div style={cell}><label style={ui_L}>UTR / reference</label><input style={I} value={f.utr} onChange={e => set({ utr: e.target.value })} /></div>
+            <div style={cell}><label style={ui_L}>UTR number <span style={{ color: G.rd }}>*</span></label><input style={{ ...I, textTransform: "uppercase" }} value={f.utr} onChange={e => set({ utr: e.target.value })} placeholder="e.g. N298261234567890" /></div>
           </div>
+          {(() => {
+            // Same UTR on another invoice: allowed (a bank may pay several units in one transfer), but shown
+            const utr = f.utr.replace(/\s+/g, "").toUpperCase();
+            const other = utr && invoices.filter(i => i.utr === utr && i.id !== `${u.id}_${month}`);
+            return other && other.length > 0 && <div style={{ fontSize: 12, color: G.am, fontWeight: 700, marginTop: 6 }}>This UTR is also recorded on {other.map(i => `${i.unitName} ${mLabel(i.month)}`).join(", ")}. Fine if the bank paid them together; otherwise check it.</div>;
+          })()}
           {Math.abs(short) >= 1 && <div style={{ fontSize: 12, color: short > 0 ? G.rd : G.am, fontWeight: 700, marginTop: 6 }}>{short > 0 ? `Short received by ${inr(short)}` : `Received ${inr(-short)} more than invoice`} after TDS. Note the reason below.</div>}
         </>
       )}
