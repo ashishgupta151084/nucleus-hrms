@@ -1,4 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
+import { onAuditSetup } from "./auditFirebase";
+// Bank concurrent audit trackers load as a separate bundle, only when opened
+const BankAudit = lazy(() => import("./BankAudit"));
 import {
   getConfig, setConfig, onConfig,
   addAttendance, updateAttendance, onAttendance,
@@ -574,7 +577,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-10-17";
+const APP_VERSION="2026-10-27";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -688,6 +691,7 @@ export default function App() {
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
+  const [auditSetup,setAuditSetup]=useState({units:[],members:[]});
 
   // Firebase realtime listeners
   useEffect(()=>{
@@ -721,6 +725,7 @@ export default function App() {
   useEffect(()=>{const u=onODs(r=>setD(p=>({...p,ods:r})));return u;},[]);
   useEffect(()=>{const u=onLocFails(r=>setD(p=>({...p,locFails:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
+  useEffect(()=>{if(!cu)return;const u=onAuditSetup(setAuditSetup);return u;},[cu?.id]);
   useEffect(()=>{
     if(!cu)return;
     const u=onNotifications(cu.id,r=>setD(p=>({...p,notifications:r})));
@@ -802,7 +807,9 @@ export default function App() {
   const live=cu?(D.users||[]).find(u=>u.id===cu.id):null;
   const me=cu?{...cu,...(live||{})}:null;
   useEffect(()=>{ if(cu&&live&&JSON.stringify(live)!==JSON.stringify(cu)) sv("nau5",{...cu,...live}); },[live]);
-  const props={user:me,D,P,ST,AN,logout,setSc,unread};
+  // Bank Audits: admin and HR always; others only if ticked in Bank Audits > Setup
+  const canAudit=!!me&&(["admin","hr"].includes(me.role)||(auditSetup.members||[]).includes(me.id));
+  const props={user:me,D,P,ST,AN,logout,setSc,unread,canAudit};
   // Show loading overlay after login until Firebase data arrives
   if(cu && !D.loaded) return (
     <div style={{minHeight:"100vh",background:G.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,fontFamily:"'Nunito',sans-serif"}}>
@@ -832,6 +839,11 @@ export default function App() {
       {sc==="dash"&&<Dash {...props}/>}
       {sc==="register"&&<Register {...props}/>}
       {sc==="superadmin"&&<SuperAdmin {...props}/>}
+      {sc==="audits"&&canAudit&&(
+        <Suspense fallback={<div style={{padding:40,textAlign:"center",color:G.mut}}>Loading Bank Audits…</div>}>
+          <BankAudit {...props} setup={auditSetup} ui={{G,B,I,L,K,Chip,FRow}}/>
+        </Suspense>
+      )}
       {toast&&<Msg t={toast}/>}
     </div>
   );
@@ -1222,7 +1234,7 @@ function LiveTimer({checkIn, checkOut}) {
 }
 
 
-function Home({user,D,P,ST,AN,logout,setSc,unread}) {
+function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
   const [outBusy,setOutBusy]=useState(false);
   const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
@@ -1658,7 +1670,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread}) {
       </div>}
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["On Duty (OD)","odreq"],["Help & manual","help"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["On Duty (OD)","odreq"],["Help & manual","help"],...(canAudit?[["🏦 Bank Audits","audits"]]:[]),...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -2225,7 +2237,7 @@ function Reg({user,D,P,ST,setSc}) {
   );
 }
 
-function Dash({user,D,P,ST,AN,logout,setSc}) {
+function Dash({user,D,P,ST,AN,logout,setSc,canAudit}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
   const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
@@ -2262,6 +2274,7 @@ function Dash({user,D,P,ST,AN,logout,setSc}) {
         <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":isHOD?"HOD / Partner":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
         {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
+          {canAudit&&<button onClick={()=>setSc("audits")} title="Bank Audits" style={{...B(G.navy),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`,fontWeight:800}}>🏦 Audits</button>}
           <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
           <button onClick={()=>setSc("help")} title="Help" style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>❔</button>
           {isA&&<button onClick={()=>setSc("superadmin")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>⚙️</button>}
