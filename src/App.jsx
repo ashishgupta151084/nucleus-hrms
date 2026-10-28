@@ -1,7 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from "react";
-import { onAuditSetup } from "./auditFirebase";
-// Bank concurrent audit trackers load as a separate bundle, only when opened
-const BankAudit = lazy(() => import("./BankAudit"));
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   getConfig, setConfig, onConfig,
   addAttendance, updateAttendance, onAttendance,
@@ -167,6 +164,13 @@ const calsOf=D=>{
   return list.length?list:[{id:DEFAULT_CAL,name:D.companyName||"Nucleus"}];
 };
 const calIdOf=user=>user?.calendarId||DEFAULT_CAL;
+// Once a firm creates its own calendars, DEFAULT_CAL stops being a real one.
+// Staff and holidays saved before that still point at it, so they belong to a
+// calendar that appears nowhere. They must be visible, not silently ignored.
+const hasCals=D=>((D.holidayCalendars||[]).length>0);
+const calExists=(D,id)=>hasCals(D)?(D.holidayCalendars||[]).some(c=>c.id===id):id===DEFAULT_CAL;
+const strandedUsers=D=>(D.users||[]).filter(u=>!calExists(D,calIdOf(u)));
+const strandedHols=D=>(D.holidays||[]).filter(h=>!calExists(D,h.calendarId||DEFAULT_CAL));
 // Holidays that apply to one person
 const holsFor=(D,user)=>{
   const cid=calIdOf(user);
@@ -394,7 +398,8 @@ const dayWise=(D,u,yr,mo)=>{
       note:[wa?"approved to work on day off":"",
         isODday?`on duty — location shared ${(odR.odPings||[]).length||1}×`:"",
         odA&&!isODday&&!off&&ds<=today?"OD approved but location never shared — needs regularization":"",
-        first?.locUnverified?`location NOT verified at check-in${first.locAccuracy?` (±${first.locAccuracy}m${first.locDistance!=null?`, ${first.locDistance}m from office`:""})`:" — no fix at all"}`:"",
+        first?.locExempt?"site has no location check (set by HR)":
+          first?.locUnverified?`location NOT verified at check-in${first.locAccuracy?` (±${first.locAccuracy}m${first.locDistance!=null?`, ${first.locDistance}m from office`:""})`:" — no fix at all"}`:"",
         first&&!lastOut&&!isODday?"missing check-out":"",
         first?.outOffOffice?"checked out away from office":"",
         first?.outOfficeChanged?`checked out at a different office (${first.checkOutOfficeName||"?"})`:"",
@@ -577,7 +582,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-10-27";
+const APP_VERSION="2026-10-28";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -691,7 +696,6 @@ export default function App() {
   const [cu,setCu]=useState(()=>ld("nau5",null));
   const [sc,setSc]=useState("login");
   const [toast,setToast]=useState(null);
-  const [auditSetup,setAuditSetup]=useState({units:[],members:[]});
 
   // Firebase realtime listeners
   useEffect(()=>{
@@ -725,7 +729,6 @@ export default function App() {
   useEffect(()=>{const u=onODs(r=>setD(p=>({...p,ods:r})));return u;},[]);
   useEffect(()=>{const u=onLocFails(r=>setD(p=>({...p,locFails:r})));return u;},[]);
   useEffect(()=>{const u=onLiveLocations(r=>setD(p=>({...p,liveLocations:r})));return u;},[]);
-  useEffect(()=>{if(!cu)return;const u=onAuditSetup(setAuditSetup);return u;},[cu?.id]);
   useEffect(()=>{
     if(!cu)return;
     const u=onNotifications(cu.id,r=>setD(p=>({...p,notifications:r})));
@@ -807,9 +810,7 @@ export default function App() {
   const live=cu?(D.users||[]).find(u=>u.id===cu.id):null;
   const me=cu?{...cu,...(live||{})}:null;
   useEffect(()=>{ if(cu&&live&&JSON.stringify(live)!==JSON.stringify(cu)) sv("nau5",{...cu,...live}); },[live]);
-  // Bank Audits: admin and HR always; others only if ticked in Bank Audits > Setup
-  const canAudit=!!me&&(["admin","hr"].includes(me.role)||(auditSetup.members||[]).includes(me.id));
-  const props={user:me,D,P,ST,AN,logout,setSc,unread,canAudit};
+  const props={user:me,D,P,ST,AN,logout,setSc,unread};
   // Show loading overlay after login until Firebase data arrives
   if(cu && !D.loaded) return (
     <div style={{minHeight:"100vh",background:G.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,fontFamily:"'Nunito',sans-serif"}}>
@@ -839,11 +840,6 @@ export default function App() {
       {sc==="dash"&&<Dash {...props}/>}
       {sc==="register"&&<Register {...props}/>}
       {sc==="superadmin"&&<SuperAdmin {...props}/>}
-      {sc==="audits"&&canAudit&&(
-        <Suspense fallback={<div style={{padding:40,textAlign:"center",color:G.mut}}>Loading Bank Audits…</div>}>
-          <BankAudit {...props} setup={auditSetup} ui={{G,B,I,L,K,Chip,FRow}}/>
-        </Suspense>
-      )}
       {toast&&<Msg t={toast}/>}
     </div>
   );
@@ -1234,12 +1230,14 @@ function LiveTimer({checkIn, checkOut}) {
 }
 
 
-function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
+function Home({user,D,P,ST,AN,logout,setSc,unread}) {
   const [outBusy,setOutBusy]=useState(false);
   const [locWait,setLocWait]=useState({secs:0,acc:null});
   const [step,setStep]=useState("idle"),[selfie,setSelfie]=useState(null),[gps,setGps]=useState(null),[office,setOffice]=useState(null),[locErr,setLocErr]=useState(null),[wfh,setWfh]=useState(false);
   const [locSure,setLocSure]=useState(true);      // false = inside only after allowing for GPS error
   const [locDiag,setLocDiag]=useState(null);      // what the phone actually reported, for the staff and the admin
+  const [exOff,setExOff]=useState(null);          // a site HR has marked as impossible to verify
+  const noGeoOffices=(user.officeIds||[]).map(id=>(D.offices||[]).find(o=>o.id===id)).filter(o=>o&&o.noGeo);
   const [pingBusy,setPingBusy]=useState(false),[showPunch,setShowPunch]=useState(false);
   // An OD record is not a normal check-in, so it must not drive the punch card
   const rec=D.attendance.find(a=>a.userId===user.id&&a.date===tod()&&!a.isOD);
@@ -1256,6 +1254,9 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
     setSelfie(img);
     setLocSure(true);                       // fresh attempt — assume verified until proven otherwise
     if(wfh){setStep("confirm");return;}
+    // HR has recorded that this site cannot be verified. Don't make the person
+    // wait 35 seconds to be told what the firm already knows.
+    if(exOff){ setOffice(exOff); setLocSure(false); setStep("confirm"); return; }
     setStep("loc");
     setLocWait({secs:0,acc:null});
     if(!navigator.geolocation){
@@ -1383,12 +1384,14 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
     // the location could not be confirmed. Lateness is still measured, and the
     // real office is recorded — it is never disguised as WFH.
     const unver=!wfh&&!locSure;
+    const exempt=!!exOff&&!wfh;
     const rec2={id:gid(),userId:user.id,userName:user.name,teamId:user.teamId,
       date:tod(),checkIn:new Date().toISOString(),checkOut:null,
       selfie,gps:wfh?null:gps,officeName:wfh?"WFH":office?.name,officeId:wfh?null:(office?.id||null),
       status:wfh?"wfh":isLate?"late":"present",lateBy:lb,isWFH:wfh,
       ...(unver?{locUnverified:true,locAccuracy:gps?gps.ac:null,
-        locDistance:gps&&office?Math.round(dist(gps.lat,gps.lng,office.lat,office.lng)):null}:{})};
+        locDistance:gps&&office?Math.round(dist(gps.lat,gps.lng,office.lat,office.lng)):null}:{}),
+      ...(exempt?{locExempt:true,locUnverified:true,locAccuracy:null,locDistance:null}:{})};
     try{
       // Update live location with check-in GPS so admin sees current location
       if(gps){
@@ -1397,13 +1400,16 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
       await addAttendance(rec2);
       if(unver){
         const mg=(D.users||[]).find(u=>u.id===user.reportingTo);
-        if(mg)AN(mg.id,`${user.name} checked in at ${office?.name} but the location could not be verified${gps?` (±${gps.ac}m, ${rec2.locDistance}m from the office)`:" — the phone gave no location"}. Please confirm.`,"info");
+        if(mg)AN(mg.id,exempt
+          ?`${user.name} checked in at ${office?.name}. Location is not checked at this site, so please confirm attendance.`
+          :`${user.name} checked in at ${office?.name} but the location could not be verified${gps?` (±${gps.ac}m, ${rec2.locDistance}m from the office)`:" — the phone gave no location"}. Please confirm.`,"info");
       }
       let msg="✅ Checked in!";
       if(wfh)msg="🏠 WFH check-in done!";
+      else if(exempt)msg=`✅ Checked in at ${office?.name} — location is not checked at this site`;
       else if(unver)msg=`✅ Checked in at ${office?.name} — location not verified, sent to your manager`;
       else if(isLate)msg=`⚠️ ${lb}m late — check-in saved`;
-      ST(msg);setStep("done");
+      ST(msg);setExOff(null);setStep("done");
     }catch(e){
       // Retry once on failure
       try{
@@ -1560,10 +1566,30 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
             {step==="idle"&&(
               <>
                 <div style={{display:"flex",gap:8,marginBottom:10}}>
-                  <button onClick={()=>setWfh(false)} style={{...B(wfh?G.card2:G.gold),flex:1,fontSize:13,color:"#fff",border:wfh?`1px solid ${G.bdr}`:"none"}}>🏢 Office</button>
-                  <button onClick={()=>setWfh(true)} style={{...B(!wfh?G.card2:G.bl),flex:1,fontSize:13,border:!wfh?`1px solid ${G.bdr}`:"none"}}>🏠 WFH</button>
+                  <button onClick={()=>{setWfh(false);setExOff(null);}} style={{...B(wfh||exOff?G.card2:G.gold),flex:1,fontSize:13,color:wfh||exOff?G.txt:"#fff",border:wfh||exOff?`1px solid ${G.bdr}`:"none"}}>🏢 Office</button>
+                  <button onClick={()=>{setWfh(true);setExOff(null);}} style={{...B(!wfh?G.card2:G.bl),flex:1,fontSize:13,border:!wfh?`1px solid ${G.bdr}`:"none"}}>🏠 WFH</button>
                 </div>
-                <button onClick={()=>setStep("cam")} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:13,color:"#fff",fontWeight:800}}>📸 Check In{wfh?" (WFH)":""}</button>
+                {/* Sites where HR has recorded that a phone cannot get a position here.
+                    No point making staff wait 35 seconds for a failure every morning. */}
+                {noGeoOffices.length>0&&!wfh&&(
+                  <div style={{background:"#fff9ef",border:`1px solid ${G.am}`,borderRadius:10,padding:10,marginBottom:10}}>
+                    <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>Sites without a location check</div>
+                    <div style={{fontSize:11,color:G.mut,marginBottom:8}}>
+                      Location cannot be read at these sites, so pick the one you are at. Your office, time and late
+                      coming are recorded as normal and your manager confirms it.
+                    </div>
+                    {noGeoOffices.map(o=>(
+                      <button key={o.id} onClick={()=>{setExOff(exOff?.id===o.id?null:o);setWfh(false);}}
+                        style={{...B(exOff?.id===o.id?G.am:G.card),width:"100%",marginBottom:6,fontSize:13,fontWeight:700,
+                          color:exOff?.id===o.id?"#fff":G.txt,border:exOff?.id===o.id?"none":`1px solid ${G.bdr}`}}>
+                        {exOff?.id===o.id?"✓ ":"📍 "}{o.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button onClick={()=>setStep("cam")} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",fontSize:15,padding:13,color:"#fff",fontWeight:800}}>
+                  📸 Check In{wfh?" (WFH)":exOff?` at ${exOff.name}`:""}
+                </button>
               </>
             )}
             {step==="cam"&&<Cam onDone={onSelfie} onCancel={()=>setStep("idle")}/>}
@@ -1582,7 +1608,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
                 {selfie&&<img src={selfie} style={{width:90,height:90,borderRadius:"50%",objectFit:"cover",border:`4px solid ${G.gold}`,marginBottom:10}}/>}
                 <div style={{color:G.gold,fontWeight:700,marginBottom:2}}>{wfh?"🏠 Work From Home":`📍 ${office?.name}`}</div>
                 <div style={{color:wfh||locSure?G.mut:G.am,fontSize:12,marginBottom:12}}>
-                  {wfh?"WFH":locSure?"Location verified ✓":`Location not verified${gps?` · ±${gps.ac}m`:""} — your manager will be asked to confirm`}
+                  {wfh?"WFH":locSure?"Location verified ✓":exOff?`Location is not checked at this site — your manager will confirm`:`Location not verified${gps?` · ±${gps.ac}m`:""} — your manager will be asked to confirm`}
                 </div>
                 <button onClick={doIn} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),width:"100%",color:"#fff",fontWeight:800}}>Confirm Check-In ✓</button>
               </div>
@@ -1670,7 +1696,7 @@ function Home({user,D,P,ST,AN,logout,setSc,unread,canAudit}) {
       </div>}
       <LECard D={D} user={user} ST={ST} AN={AN}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["On Duty (OD)","odreq"],["Help & manual","help"],...(canAudit?[["🏦 Bank Audits","audits"]]:[]),...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
+        {[["History","hist"],["Leaves"+(pl>0?` (${pl})`:""  ),"lv"],["Regularize","reg"],["Notifications"+(unread>0?` (${unread})`:""  ),"notif"],["My Profile","profile"],["Work on Holiday","workreq"],["On Duty (OD)","odreq"],["Help & manual","help"],...(["manager","hod","branch_head"].includes(user.role)?[["My Team","teamdash"]]:[]  )].map(([lb,s])=>(
           <button key={s} onClick={()=>setSc(s)} style={{...B(G.card),border:`1px solid ${G.bdr}`,fontSize:12,padding:10,fontWeight:600}}>{lb}</button>
         ))}
       </div>
@@ -2237,7 +2263,7 @@ function Reg({user,D,P,ST,setSc}) {
   );
 }
 
-function Dash({user,D,P,ST,AN,logout,setSc,canAudit}) {
+function Dash({user,D,P,ST,AN,logout,setSc}) {
   const [tab,setTab]=useState("ov");
   const isA=user.role==="admin"||user.role==="hr";
   const tabs=isA?[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"],["pay","Payroll"],["pol","Policy"],["hol","Holidays"],["st","Staff"],["tm","Teams"],["of","Offices"],["br","Branches"],["org","Hierarchy"],["bk","💾 Backups"],["rst","⚙ Reset"]]:[["ov","Overview"],["live","Live"],["att","Records"],["lv","Leaves"],["rg","Regularize"],["co","Comp Off"],["od","🚗 On Duty"],...(user.role==="hod"?[["lb","Leave balances"],["ex","⚠ Exceptions"],["le","Late/Early rules"]]:[]),["pay","Payroll"]];
@@ -2274,7 +2300,6 @@ function Dash({user,D,P,ST,AN,logout,setSc,canAudit}) {
         <div style={{display:"flex",gap:10,alignItems:"center"}}><Logo s={26}/><div><div style={{fontSize:10,color:G.gold,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.05em"}}>{isA?"Admin":isHOD?"HOD / Partner":"Manager"}</div><div style={{fontSize:16,fontWeight:900}}>{user.name}</div></div></div>
         {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
-          {canAudit&&<button onClick={()=>setSc("audits")} title="Bank Audits" style={{...B(G.navy),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`,fontWeight:800}}>🏦 Audits</button>}
           <button onClick={()=>setSc("profile")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>👤</button>
           <button onClick={()=>setSc("help")} title="Help" style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>❔</button>
           {isA&&<button onClick={()=>setSc("superadmin")} style={{...B(G.navyL),fontSize:11,padding:"7px 10px",border:`1px solid ${G.bdr}`}}>⚙️</button>}
@@ -3355,7 +3380,7 @@ function PT({D,vu,ST,user}) {
     const pd=Math.min(wd,Math.round((tp+cl+sl+st+co)*10)/10),ab=Math.max(0,Math.round((wdSoFar-pd)*10)/10);
     const team=D.teams.find(t=>t.id===u.teamId);
     const cal=calsOf(D).find(x=>x.id===calIdOf(u));
-    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||"Default",offDays,wd,wdSoFar,pr,lt,wf,odc,odMiss,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
+    return{id:u.id,name:u.name,email:u.email,team:team?.name||"-",cal:cal?.name||(calExists(D,calIdOf(u))?"Default":"NO CALENDAR SET"),offDays,wd,wdSoFar,pr,lt,wf,odc,odMiss,hd,cl,sl,st,co,tp,pd,ab,lt2:lt,aH:`${Math.floor(am/60)}h${am%60}m`,tH:`${Math.floor(tm/60)}h${tm%60}m`,pct:wd?Math.round((tp/wd)*100):0};
   });
   const [open,setOpen]=useState(null);         // staff shown day-by-day
   const dayHead=["Staff","Date","Day","Day type","Status","Check in / first ping","Check out / last ping","Hours","Late (min)","Early (min)","Mode","Office / OD place","Sessions","Regularized","Comp off day","OD day","Location shares","Remarks"];
@@ -3517,6 +3542,7 @@ function HC({D,P,ST}) {
   const [mgCal,setMgCal]=useState(false);
   const [calName,setCalName]=useState("");
   const [editCal,setEditCal]=useState(null);
+  const [fixTo,setFixTo]=useState("");
 
   const active=cals.find(x=>x.id===calId)||cals[0];
   const hs=(D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)===calId)
@@ -3533,6 +3559,9 @@ function HC({D,P,ST}) {
   const saveCal=()=>{
     if(!calName.trim())return ST("Calendar name required","error");
     const list=calsOf(D);
+    const nm=calName.trim().toLowerCase();
+    if(list.some(x=>x.id!==editCal&&(x.name||"").trim().toLowerCase()===nm))
+      return ST("A calendar with that name already exists","error");
     if(editCal){
       P({...D,holidayCalendars:list.map(x=>x.id===editCal?{...x,name:calName.trim()}:x)});
       ST("Calendar renamed");
@@ -3576,6 +3605,10 @@ function HC({D,P,ST}) {
               border:calId===cl.id?"none":`1px solid ${G.bdr}`,fontSize:12,padding:"7px 12px",
               whiteSpace:"nowrap",flexShrink:0,fontWeight:700}}>
             {cl.name}
+            <span style={{display:"block",fontSize:10,opacity:.8,fontWeight:600}}>
+              {(D.holidays||[]).filter(h=>(h.calendarId||DEFAULT_CAL)===cl.id).length} hol ·{" "}
+              {(D.users||[]).filter(u=>calIdOf(u)===cl.id).length} staff
+            </span>
           </button>
         ))}
         <button onClick={()=>{setMgCal(!mgCal);setEditCal(null);setCalName("");}}
@@ -3602,6 +3635,53 @@ function HC({D,P,ST}) {
           </div>
         </div>
       )}
+
+      {/* Records pointing at a calendar that no longer exists */}
+      {(()=>{
+        const su=strandedUsers(D), sh=strandedHols(D);
+        if(!su.length&&!sh.length)return null;
+        return (
+          <div style={{...K,border:`1px solid ${G.rd}`,background:"#fdeeee"}}>
+            <div style={{fontWeight:800,color:G.rd,fontSize:14}}>⚠ Not on any calendar</div>
+            <div style={{fontSize:12,color:G.mut,marginTop:4}}>
+              <b>{su.length} staff</b> and <b>{sh.length} holiday{sh.length===1?"":"s"}</b> point at a calendar that no longer
+              exists. Those staff are seeing those holidays and nothing from the calendar you think they are on, and their
+              payroll working days are wrong. Move them to a real calendar below.
+            </div>
+            {su.length>0&&<div style={{fontSize:11,color:G.dim,marginTop:6}}>Staff: {su.map(u=>u.name).join(", ")}</div>}
+            {sh.length>0&&<div style={{fontSize:11,color:G.dim,marginTop:2}}>Holidays: {sh.slice(0,8).map(h=>`${h.name} ${h.date}`).join(" · ")}{sh.length>8?` · +${sh.length-8} more`:""}</div>}
+            <div style={{display:"flex",gap:8,marginTop:10}}>
+              <select style={{...I,flex:1,marginBottom:0}} value={fixTo} onChange={e=>setFixTo(e.target.value)}>
+                <option value="">Move them to…</option>
+                {cals.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <button disabled={!fixTo} onClick={()=>{
+                const t=cals.find(c=>c.id===fixTo); if(!t)return;
+                if(!confirm(`Move ${su.length} staff to "${t.name}"?\n\nTheir holidays and payroll working days will follow that calendar.`))return;
+                P({...D,users:(D.users||[]).map(u=>calExists(D,calIdOf(u))?u:{...u,calendarId:fixTo})});
+                ST(`${su.length} staff moved to ${t.name}`);
+              }} style={{...B(su.length&&fixTo?G.gold:G.dim),flex:1,fontSize:12,color:"#fff",fontWeight:700}}>
+                Move {su.length} staff
+              </button>
+              <button disabled={!fixTo} onClick={()=>{
+                const t=cals.find(c=>c.id===fixTo); if(!t)return;
+                if(!confirm(`Move ${sh.length} holidays into "${t.name}"?\n\nCheck they belong there — a bank calendar should not carry the firm's holidays.`))return;
+                P({...D,holidays:(D.holidays||[]).map(h=>calExists(D,h.calendarId||DEFAULT_CAL)?h:{...h,calendarId:fixTo})});
+                ST(`${sh.length} holidays moved to ${t.name}`);
+              }} style={{...B(sh.length&&fixTo?G.card:G.dim),flex:1,fontSize:12,border:`1px solid ${G.bdr}`,
+                color:sh.length&&fixTo?G.txt:"#fff",fontWeight:700}}>
+                Move {sh.length} holidays
+              </button>
+            </div>
+            <div style={{fontSize:11,color:G.dim,marginTop:8}}>
+              Move the staff and the holidays separately — they usually belong in different calendars.
+              Holidays that are the firm's own should go to your firm calendar, not to a bank one.
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Active calendar summary */}
       <div style={{...K,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -3661,10 +3741,12 @@ function SC({D,P,ST}) {
   const [sTeam,setSTeam]=useState("");
   const [sa,setSa]=useState(false);
   const [editU,setEditU]=useState(null);
-  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:DEFAULT_CAL,articleshipStart:"",doj:"",mobile:""};
+  const emptyF={name:"",email:"",password:"pass123",role:"staff",employeeType:"employee",teamId:"",officeIds:[],reportingTo:"",designation:"",weeklyOff:"sun_sat",calendarId:(calsOf(D)[0]?.id||DEFAULT_CAL),articleshipStart:"",doj:"",mobile:""};
   const [f,setF]=useState(emptyF);
   const save=()=>{
     if(!f.name||!f.email)return ST("Name and email required","error");
+    if(!calExists(D,f.calendarId||DEFAULT_CAL))
+      return ST("Choose a holiday calendar for this person","error");
     if(editU){P({...D,users:D.users.map(u=>u.id===editU?{...u,...f}:u)});ST("✅ Updated!");}
     else{P({...D,users:[...D.users,{...f,id:gid()}]});ST("✅ Added!");}
     setSa(false);setEditU(null);setF(emptyF);
@@ -3727,9 +3809,18 @@ function SC({D,P,ST}) {
             </select>
           </FRow>
           <FRow label="Holiday Calendar">
-            <select style={I} value={f.calendarId||DEFAULT_CAL} onChange={e=>setF({...f,calendarId:e.target.value})}>
+            <select style={{...I,...(calExists(D,f.calendarId||DEFAULT_CAL)?{}:{borderColor:G.rd})}}
+              value={calExists(D,f.calendarId||DEFAULT_CAL)?(f.calendarId||DEFAULT_CAL):""}
+              onChange={e=>setF({...f,calendarId:e.target.value})}>
+              {!calExists(D,f.calendarId||DEFAULT_CAL)&&<option value="">— Not set — choose one</option>}
               {calsOf(D).map(cl=><option key={cl.id} value={cl.id}>{cl.name}</option>)}
             </select>
+            {!calExists(D,f.calendarId||DEFAULT_CAL)&&(
+              <div style={{fontSize:11,color:G.rd,marginTop:4,fontWeight:700}}>
+                No calendar is set for this person. They are following no calendar's holidays, and their payroll
+                working days are wrong until you choose one.
+              </div>
+            )}
             <div style={{fontSize:11,color:G.dim,marginTop:4}}>
               Decides which holidays apply and the payable working days in payroll.
             </div>
@@ -3776,7 +3867,7 @@ function SC({D,P,ST}) {
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13}}>{u.name}{u.designation&&<span style={{fontSize:11,color:G.mut}}> — {u.designation}</span>}</div>
               <div style={{fontSize:11,color:G.dim}}>{u.email}</div>
-              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).filter(id=>D.offices.some(o=>o.id===id)).length} office(s) · 📅 {calsOf(D).find(x=>x.id===calIdOf(u))?.name||"Default"}</div>
+              <div style={{fontSize:11,color:G.mut,marginTop:1}}>{team?.name||"No team"} · {(u.officeIds||[]).filter(id=>D.offices.some(o=>o.id===id)).length} office(s) · 📅 {calExists(D,calIdOf(u))?(calsOf(D).find(x=>x.id===calIdOf(u))?.name||"Default"):<span style={{color:G.rd,fontWeight:700}}>no calendar set</span>}</div>
               {(u.officeIds||[]).filter(id=>D.offices.some(o=>o.id===id)).length===0&&(
                 <div style={{fontSize:11,color:G.am,fontWeight:700,marginTop:2}}>⚠ No office linked — cannot check in from office</div>
               )}
@@ -3852,7 +3943,7 @@ function TC({D,P,ST}) {
 function OC({D,P,ST}) {
   const [sa,setSa]=useState(false);
   const [editO,setEditO]=useState(null);
-  const emptyOF={name:"",lat:"",lng:"",radius:200,branchId:""};
+  const emptyOF={name:"",lat:"",lng:"",radius:200,branchId:"",noGeo:false,noGeoReason:""};
   const [f,setF]=useState(emptyOF);
   const [dt,setDt]=useState(false);
   const [search,setSearch]=useState("");
@@ -3882,7 +3973,8 @@ function OC({D,P,ST}) {
 
   const save=()=>{
     if(!f.name||!f.lat||!f.lng)return ST("Name and location required","error");
-    const rec={...f,lat:parseFloat(f.lat),lng:parseFloat(f.lng),radius:parseInt(f.radius)};
+    const rec={...f,lat:parseFloat(f.lat),lng:parseFloat(f.lng),radius:parseInt(f.radius),
+      noGeo:!!f.noGeo,noGeoReason:(f.noGeoReason||'').trim()};
     if(editO){P({...D,offices:D.offices.map(o=>o.id===editO?{...o,...rec}:o)});ST("✅ Updated!");}
     else{P({...D,offices:[...D.offices,{...rec,id:gid()}]});ST("✅ Added!");}
     setSa(false);setEditO(null);setF(emptyOF);setSearch("");
@@ -3907,6 +3999,24 @@ function OC({D,P,ST}) {
             ST={ST}
           />
           <FRow label="Geofence Radius (meters)"><input type="number" style={I} value={f.radius} onChange={e=>setF({...f,radius:e.target.value})}/></FRow>
+          <div style={{background:f.noGeo?"#fff9ef":G.card2,border:`1px solid ${f.noGeo?G.am:G.bdr}`,borderRadius:10,padding:10,marginBottom:10}}>
+            <label style={{display:"flex",gap:8,alignItems:"flex-start",cursor:"pointer"}}>
+              <input type="checkbox" checked={!!f.noGeo} onChange={e=>setF({...f,noGeo:e.target.checked})} style={{marginTop:3,width:16,height:16,flexShrink:0}}/>
+              <span>
+                <span style={{fontWeight:700,fontSize:13,display:"block"}}>Location cannot be verified at this site</span>
+                <span style={{fontSize:11,color:G.mut}}>
+                  Use only where phones genuinely cannot get a position here. Staff assigned to this office get a
+                  direct check-in button for it. Their attendance, office and late coming are recorded as normal and
+                  marked <b>location not verified</b> for the manager. Every other office keeps its geofence.
+                </span>
+              </span>
+            </label>
+            {f.noGeo&&(
+              <input style={{...I,marginTop:8,marginBottom:0}} value={f.noGeoReason||""}
+                onChange={e=>setF({...f,noGeoReason:e.target.value})}
+                placeholder="Reason for the record, e.g. no GPS inside the branch"/>
+            )}
+          </div>
           <div style={{display:"flex",gap:8}}>
             <button onClick={save} style={{...B(`linear-gradient(135deg,${G.gold},${G.goldD})`),flex:2,color:"#fff",fontWeight:800}}>{editO?"💾 Save":"✅ Add Office"}</button>
             <button onClick={()=>{setSa(false);setEditO(null);setF(emptyOF);setSearch("");}} style={{...B(G.dim),flex:1}}>Cancel</button>
@@ -3916,10 +4026,11 @@ function OC({D,P,ST}) {
       {D.offices.map(o=>(
         <div key={o.id} style={{...K}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m · {(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length} staff</div></div>
+          <div><div style={{fontWeight:700}}>🏢 {o.name}</div><div style={{fontSize:12,color:G.mut}}>📍 {o.lat},{o.lng} · {o.radius}m · {(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length} staff</div>
+          {o.noGeo&&<div style={{fontSize:11,color:G.am,fontWeight:700,marginTop:2}}>⚠ Location check off{o.noGeoReason?` — ${o.noGeoReason}`:""}</div>}</div>
           {SAAS_MODE&&D.firmTrial&&(()=>{const daysLeft=Math.max(0,Math.ceil((new Date(D.firmTrial)-new Date())/(1000*60*60*24)));return daysLeft<=7&&(<div style={{background:daysLeft===0?G.rd:G.am,color:"#fff",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:8,marginBottom:8,width:"100%",textAlign:"center"}}>⏰ {daysLeft===0?"Trial expired! ":"Trial: "}{daysLeft} days left</div>);})()}
         <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>{setF({name:o.name,lat:String(o.lat),lng:String(o.lng),radius:o.radius});setEditO(o.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
+            <button onClick={()=>{setF({name:o.name,lat:String(o.lat),lng:String(o.lng),radius:o.radius,branchId:o.branchId||"",noGeo:!!o.noGeo,noGeoReason:o.noGeoReason||""});setEditO(o.id);setSa(true);}} style={{...B(G.bl),fontSize:11,padding:"5px 9px"}}>✏️</button>
             <button onClick={()=>{
               const n=(D.users||[]).filter(u=>(u.officeIds||[]).includes(o.id)).length;
               if(!confirm(n?`${n} staff are linked to "${o.name}". If you delete it they cannot check in until you assign them another office.\n\nTo move an office, use Edit instead of deleting.\n\nDelete anyway?`:`Delete "${o.name}"?`))return;
