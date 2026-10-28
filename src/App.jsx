@@ -582,7 +582,7 @@ const GRACE_MINS=15;
 // OFF for in-house use at Nucleus. Turn ON only when selling to other firms.
 const SAAS_MODE=false;
 // Shown on the login screen so you can tell which build a phone is actually running
-const APP_VERSION="2026-10-28";
+const APP_VERSION="2026-10-28b";
 const PLANS={
   trial:{name:"Free Trial",maxUsers:10,days:30,price:0},
   starter:{name:"Starter",maxUsers:10,price:999},
@@ -748,18 +748,27 @@ export default function App() {
   },[cu?.id]);
 
   const ST=(msg,type="success")=>{setToast({msg,type});setTimeout(()=>setToast(null),3000);};
+  // Every settings change goes through here. The screen used to update first and
+  // stay updated even when the write failed, so a change could look saved, survive
+  // until the next load, and then silently come back as it was. A failed write now
+  // puts the screen back and says so.
   const P=useCallback(nd=>{
+    const prev=D;
     setD(nd);
 
     // CRITICAL SAFETY GUARDS - never write to Firebase if:
     // 1. Firebase hasn't loaded real data yet (would write empty/SEED data)
     if(!D.loaded){
       console.warn("P() blocked: Firebase not loaded yet");
+      setD(prev);
+      ST("NOT SAVED — the app is still loading. Wait a moment and try again.","error");
       return;
     }
     // 2. Users array is empty (would wipe all staff)
     if(!nd.users||nd.users.length===0){
       console.warn("P() blocked: empty users array");
+      setD(prev);
+      ST("NOT SAVED — that change would have removed every staff member.","error");
       return;
     }
 
@@ -774,6 +783,11 @@ export default function App() {
     if(Date.now()-(window.__nuLastBk||0)>60*60*1000){ window.__nuLastBk=Date.now(); saveBackup(D,"before change").catch(()=>{}); }
     setConfig({changes,arrayChanges,initialConfig:configData}).catch(error=>{
       console.error("Config save failed:",error);
+      setD(prev);                       // the screen must not keep showing a change that was rejected
+      window.__nuLastSaveError={at:new Date().toISOString(),msg:String(error&&error.message||error),
+        code:(error&&error.code)||null,fields:Object.keys(arrayChanges).concat(Object.keys(changes))};
+      ST("NOT SAVED — "+(error&&error.message?error.message:"the change could not be written")+
+         ". Nothing has changed. Screenshot this and send it to Ashish.","error");
     });
   },[D]);
   const AN=useCallback((uid,msg,type="info")=>{
